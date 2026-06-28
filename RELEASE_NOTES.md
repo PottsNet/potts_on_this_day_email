@@ -1,6 +1,6 @@
-# Potts On This Day Email 1.0.0-beta.4
+# Potts On This Day Email 1.0.0-beta.5
 
-This public beta is a GitHub sharing and release-packaging clean-up for webtrees 2.2.6.
+This public beta improves settings-page navigation for webtrees 2.2.6.
 
 It lets registered users opt in to personalised daily emails containing births,
 deaths and marriages from the family tree. Results can be limited by relationship
@@ -18,6 +18,10 @@ on the module settings page.
 Open **Control panel > Modules > All modules**, locate Potts On This Day Email
 and select its settings icon. The page contains sender, timezone, tree,
 subscriber, scheduler and delivery-status controls.
+
+This release also adds a Control panel breadcrumb to the settings page, keeps
+the selected tree stable when administrators switch between trees and adds an
+admin-only settings link to the My Page block.
 
 The release ZIP intentionally includes only `data/.htaccess` and
 `data/.gitignore` inside the `data` directory. Do not publish a `data` folder

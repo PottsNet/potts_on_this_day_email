@@ -63,7 +63,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     public function customModuleVersion(): string
     {
-        return '1.0.0-beta.4';
+        return '1.0.0-beta.5';
     }
 
     public function customModuleLatestVersion(): string
@@ -78,7 +78,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     public function customModuleSupportUrl(): string
     {
-        return 'https://github.com/PottsNet/potts-on-this-day-email/issues';
+        return 'https://github.com/PottsNet/potts_on_this_day_email/issues';
     }
 
     public function customTranslations(string $language): array
@@ -93,17 +93,25 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         View::registerNamespace('potts-on-this-day-email', $this->resourcesFolder() . 'views/');
 
         $trees = $this->availableTrees();
-        $requested_tree = Validator::queryParams($request)->string('tree', '');
+        $requested_tree = $this->requestedTreeName($request);
         $settings = $this->settings();
         $selected_tree = $this->treeFromName($requested_tree)
             ?? $this->treeFromName((string) ($settings['tree'] ?? ''))
             ?? ($trees[0] ?? null);
+        $return_url = $this->cleanReturnUrl(Validator::queryParams($request)->string('return_url', ''));
+        $tree_urls = [];
+        foreach ($trees as $tree) {
+            $tree_urls[$tree->name()] = $this->moduleAdminUrl($tree, [], $return_url);
+        }
 
         return $this->viewResponse('potts-on-this-day-email::admin/settings', [
             'title'          => I18N::translate('Potts On This Day Email settings'),
-            'action_url'     => route('module', ['module' => $this->name(), 'action' => 'Admin']),
+            'action_url'     => $this->moduleAdminUrl($selected_tree, [], $return_url),
+            'control_panel_url' => $this->controlPanelUrl(),
+            'return_url'     => $return_url,
             'module_name'    => $this->name(),
             'trees'          => $trees,
+            'tree_urls'      => $tree_urls,
             'selected_tree'  => $selected_tree,
             'settings'       => $settings,
             'saved'          => Validator::queryParams($request)->boolean('saved', false),
@@ -124,10 +132,13 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $data = is_array($parsed) ? $parsed : [];
         $task = isset($data['task']) && is_string($data['task']) ? $data['task'] : 'save';
         $tree_name = isset($data['tree']) && is_string($data['tree']) ? trim($data['tree']) : '';
+        $return_url = isset($data['return_url']) && is_string($data['return_url'])
+            ? $this->cleanReturnUrl($data['return_url'])
+            : '';
         $tree = $this->treeFromName($tree_name);
 
         if (!$tree instanceof Tree) {
-            return $this->adminRedirect('', ['error' => 'Choose a valid family tree.']);
+            return $this->adminRedirect('', ['error' => 'Choose a valid family tree.'], $return_url);
         }
 
         $settings = $this->settings();
@@ -137,10 +148,10 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             $settings['token'] = bin2hex(random_bytes(24));
 
             if (!$this->saveSettings($settings)) {
-                return $this->adminRedirect($tree->name(), ['error' => 'The scheduler settings could not be saved. Check that the module data directory is writable.']);
+                return $this->adminRedirect($tree->name(), ['error' => 'The scheduler settings could not be saved. Check that the module data directory is writable.'], $return_url);
             }
 
-            return $this->adminRedirect($tree->name(), [$task === 'reset_token' ? 'token_reset' : 'prepared' => '1']);
+            return $this->adminRedirect($tree->name(), [$task === 'reset_token' ? 'token_reset' : 'prepared' => '1'], $return_url);
         }
 
         $timezone = isset($data['timezone']) && is_string($data['timezone'])
@@ -154,11 +165,11 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             : '';
 
         if (!in_array($timezone, timezone_identifiers_list(), true)) {
-            return $this->adminRedirect($tree->name(), ['error' => 'Enter a valid PHP timezone, such as Australia/Melbourne or Europe/London.']);
+            return $this->adminRedirect($tree->name(), ['error' => 'Enter a valid PHP timezone, such as Australia/Melbourne or Europe/London.'], $return_url);
         }
 
         if (filter_var($sender_email, FILTER_VALIDATE_EMAIL) === false) {
-            return $this->adminRedirect($tree->name(), ['error' => 'Enter a valid sender email address.']);
+            return $this->adminRedirect($tree->name(), ['error' => 'Enter a valid sender email address.'], $return_url);
         }
 
         $settings['timezone'] = $timezone;
@@ -166,10 +177,10 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $settings['sender_name'] = $sender_name !== '' ? $sender_name : $sender_email;
 
         if (!$this->saveSettings($settings)) {
-            return $this->adminRedirect($tree->name(), ['error' => 'The settings could not be saved. Check that the module data directory is writable.']);
+            return $this->adminRedirect($tree->name(), ['error' => 'The settings could not be saved. Check that the module data directory is writable.'], $return_url);
         }
 
-        return $this->adminRedirect($tree->name(), ['saved' => '1']);
+        return $this->adminRedirect($tree->name(), ['saved' => '1'], $return_url);
     }
 
     public function getBlock(Tree $tree, int $block_id, string $context, array $config = []): string
@@ -224,6 +235,9 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $personal_html = '';
 
         if ($is_signed_in) {
+            if (Auth::isAdmin($user)) {
+                $buttons .= '<p class="mb-2"><a class="btn btn-outline-secondary" href="' . $this->esc($this->moduleAdminUrl($tree, [], $this->currentPageUrl([]))) . '">On This Day Email settings</a></p>';
+            }
             if ($personal_ready) {
                 $buttons .= '<p class="mb-2"><a class="btn btn-primary" href="' . $this->esc($this->sendUrl($block_id, 'me')) . '">Send test email to my webtrees account</a></p>';
             }
@@ -2629,22 +2643,141 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         return null;
     }
 
-    private function adminRedirect(string $tree_name, array $parameters = []): ResponseInterface
+    private function requestedTreeName(ServerRequestInterface $request): string
     {
-        $route_parameters = [
-            'module' => $this->name(),
-            'action' => 'Admin',
-        ];
-
+        $tree_name = Validator::queryParams($request)->string('tree', '');
         if ($tree_name !== '') {
-            $route_parameters['tree'] = $tree_name;
+            return $tree_name;
+        }
+
+        $tree = $request->getAttribute('tree');
+        if ($tree instanceof Tree) {
+            return $tree->name();
+        }
+        if (is_string($tree)) {
+            return $tree;
+        }
+
+        return '';
+    }
+
+    private function moduleAdminUrl(?Tree $tree = null, array $parameters = [], string $return_url = ''): string
+    {
+        $route_parameters = [];
+
+        if ($tree instanceof Tree) {
+            $route_parameters['tree'] = $tree->name();
+        }
+
+        $return_url = $this->cleanReturnUrl($return_url);
+        if ($return_url !== '') {
+            $route_parameters['return_url'] = $return_url;
         }
 
         foreach ($parameters as $key => $value) {
             $route_parameters[(string) $key] = (string) $value;
         }
 
-        return redirect(route('module', $route_parameters));
+        return $this->urlWithQuery(route('module', [
+            'module' => $this->name(),
+            'action' => 'Admin',
+        ]), $route_parameters);
+    }
+
+    private function urlWithQuery(string $url, array $parameters): string
+    {
+        if ($parameters === []) {
+            return $url;
+        }
+
+        $fragment = '';
+        if (str_contains($url, '#')) {
+            [$url, $fragment] = explode('#', $url, 2);
+            $fragment = '#' . $fragment;
+        }
+
+        $separator = str_contains($url, '?') ? '&' : '?';
+
+        return $url . $separator . http_build_query($parameters) . $fragment;
+    }
+
+    private function controlPanelUrl(): string
+    {
+        try {
+            return route('admin-control-panel');
+        } catch (Throwable) {
+            $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+            $parts = parse_url($request_uri);
+            $path = $parts['path'] ?? '';
+            $base = '';
+
+            if (($index = strpos($path, '/index.php')) !== false) {
+                $base = substr($path, 0, $index);
+            }
+
+            return ($base !== '' ? $base : '') . '/admin';
+        }
+    }
+
+    private function cleanReturnUrl(string $url): string
+    {
+        $url = trim($url);
+        if ($url === '' || str_contains($url, "\r") || str_contains($url, "\n") || str_starts_with($url, '//')) {
+            return '';
+        }
+
+        $parts = parse_url($url);
+        if (!is_array($parts)) {
+            return '';
+        }
+
+        if (isset($parts['scheme']) || isset($parts['host'])) {
+            $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+            $host = strtolower((string) ($parts['host'] ?? ''));
+            $current_host = strtolower((string) ($_SERVER['HTTP_HOST'] ?? ''));
+
+            if (!in_array($scheme, ['http', 'https'], true) || $host === '' || $host !== $current_host) {
+                return '';
+            }
+        }
+
+        $path = (string) ($parts['path'] ?? '');
+        if (!str_starts_with($path, '/')) {
+            return '';
+        }
+
+        $return = $path;
+        if (isset($parts['query'])) {
+            $return .= '?' . $parts['query'];
+        }
+        if (isset($parts['fragment'])) {
+            $return .= '#' . $parts['fragment'];
+        }
+
+        return $return;
+    }
+
+    private function adminRedirect(string $tree_name, array $parameters = [], string $return_url = ''): ResponseInterface
+    {
+        $route_parameters = [];
+
+        if ($tree_name !== '') {
+            $route_parameters['tree'] = $tree_name;
+        }
+
+        $return_url = $this->cleanReturnUrl($return_url);
+        if ($return_url !== '') {
+            $route_parameters['return_url'] = $return_url;
+        }
+
+        foreach ($parameters as $key => $value) {
+            $route_parameters[(string) $key] = (string) $value;
+        }
+
+        return redirect($this->urlWithQuery(route('module', [
+            'module' => $this->name(),
+            'action' => 'Admin',
+        ]), $route_parameters));
     }
 
     private function settings(): array
@@ -2817,6 +2950,10 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         foreach ($add as $key => $value) {
             $query[$key] = $value;
+        }
+
+        if ($query === []) {
+            return $path;
         }
 
         return $path . '?' . http_build_query($query);

@@ -6,8 +6,10 @@ use Fisharebest\Webtrees\Tree;
 
 /**
  * @var string $action_url
+ * @var string $control_panel_url
  * @var string $module_name
  * @var array<int,Tree> $trees
+ * @var array<string,string> $tree_urls
  * @var Tree|null $selected_tree
  * @var array<string,string> $settings
  * @var bool $saved
@@ -17,6 +19,7 @@ use Fisharebest\Webtrees\Tree;
  * @var string $version
  * @var string $subscriber_html
  * @var string $scheduler_html
+ * @var string $return_url
  */
 
 $selected_name = $selected_tree instanceof Tree ? $selected_tree->name() : '';
@@ -27,6 +30,13 @@ $has_token = (string) ($settings['token'] ?? '') !== '';
 ?>
 
 <div class="container-xl py-3">
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="<?= e($control_panel_url) ?>">Control panel</a></li>
+            <li class="breadcrumb-item active" aria-current="page">Potts On This Day Email settings</li>
+        </ol>
+    </nav>
+
     <?php if ($saved) : ?>
         <div class="alert alert-success" role="status">The Potts On This Day Email settings have been saved.</div>
     <?php endif ?>
@@ -45,7 +55,13 @@ $has_token = (string) ($settings['token'] ?? '') !== '';
             <h2 class="h3 mb-1">Potts On This Day Email settings</h2>
             <p class="text-muted mb-0">Configure webtrees email delivery, the family tree and the daily scheduler.</p>
         </div>
-        <span class="badge text-bg-secondary">v<?= e($version) ?></span>
+        <div class="d-flex flex-wrap align-items-center justify-content-end gap-2">
+            <?php if ($return_url !== '') : ?>
+                <a class="btn btn-outline-secondary btn-sm" href="<?= e($return_url) ?>">Return to previous page</a>
+            <?php endif ?>
+            <a class="btn btn-outline-secondary btn-sm" href="<?= e($control_panel_url) ?>">Control panel</a>
+            <span class="badge text-bg-secondary">v<?= e($version) ?></span>
+        </div>
     </div>
 
     <?php if ($trees === []) : ?>
@@ -57,7 +73,7 @@ $has_token = (string) ($settings['token'] ?? '') !== '';
                 <label class="form-label" for="potts-otd-tree-select">Configure this tree</label>
                 <select class="form-select" id="potts-otd-tree-select" onchange="window.location.href=this.value">
                     <?php foreach ($trees as $tree) : ?>
-                        <?php $tree_url = route('module', ['module' => $module_name, 'action' => 'Admin', 'tree' => $tree->name()]); ?>
+                        <?php $tree_url = $tree_urls[$tree->name()] ?? route('module', ['module' => $module_name, 'action' => 'Admin']); ?>
                         <option value="<?= e($tree_url) ?>" <?= $tree->name() === $selected_name ? 'selected' : '' ?>><?= e($tree->title()) ?></option>
                     <?php endforeach ?>
                 </select>
@@ -68,6 +84,9 @@ $has_token = (string) ($settings['token'] ?? '') !== '';
         <form method="post" action="<?= e($action_url) ?>">
             <?= csrf_field() ?>
             <input type="hidden" name="tree" value="<?= e($selected_name) ?>">
+            <?php if ($return_url !== '') : ?>
+                <input type="hidden" name="return_url" value="<?= e($return_url) ?>">
+            <?php endif ?>
 
             <div class="card mb-3">
                 <div class="card-header"><h3 class="h5 mb-0">Email delivery</h3></div>

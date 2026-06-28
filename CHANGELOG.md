@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0-beta.5 - 2026-06-28
+
+- Fixes the administrator tree selector so the selected tree is read from both query and route attributes.
+- Adds a breadcrumb and Control panel link to the module settings page.
+- Adds an admin-only settings link to the My Page block.
+- Preserves a return link when the settings page is opened from the My Page block.
+- Corrects the module support URL to the GitHub repository that uses underscores.
+
 ## 1.0.0-beta.4 - 2026-06-26
 
 - Cleans the public release package by excluding runtime settings, subscriber data, scheduler locks and logs.
