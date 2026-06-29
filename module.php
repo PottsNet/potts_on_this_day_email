@@ -63,7 +63,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     public function customModuleVersion(): string
     {
-        return '1.0.0-beta.5';
+        return '1.0.0-beta.6';
     }
 
     public function customModuleLatestVersion(): string
@@ -107,7 +107,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         return $this->viewResponse('potts-on-this-day-email::admin/settings', [
             'title'          => I18N::translate('Potts On This Day Email settings'),
             'action_url'     => $this->moduleAdminUrl($selected_tree, [], $return_url),
-            'control_panel_url' => $this->controlPanelUrl(),
+            'control_panel_url' => $this->controlPanelUrl($selected_tree),
             'return_url'     => $return_url,
             'module_name'    => $this->name(),
             'trees'          => $trees,
@@ -2701,22 +2701,46 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         return $url . $separator . http_build_query($parameters) . $fragment;
     }
 
-    private function controlPanelUrl(): string
+    private function controlPanelUrl(?Tree $tree = null): string
     {
+        $admin_route = $tree instanceof Tree ? '/' . $tree->name() . '/admin' : '/admin';
+
+        if ($this->currentRequestUsesIndexRoute()) {
+            return $this->indexRouteUrl($admin_route);
+        }
+
         try {
             return route('admin-control-panel');
         } catch (Throwable) {
-            $request_uri = $_SERVER['REQUEST_URI'] ?? '';
-            $parts = parse_url($request_uri);
-            $path = $parts['path'] ?? '';
-            $base = '';
+            return $this->indexRouteUrl($admin_route);
+        }
+    }
+
+    private function currentRequestUsesIndexRoute(): bool
+    {
+        $request_uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+
+        return str_contains($request_uri, '/index.php') || str_contains($request_uri, 'route=');
+    }
+
+    private function indexRouteUrl(string $route): string
+    {
+        $script_name = (string) ($_SERVER['SCRIPT_NAME'] ?? '');
+        $script_name = $script_name !== '' ? $script_name : '/index.php';
+
+        if (!str_ends_with($script_name, '/index.php')) {
+            $request_uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+            $path = parse_url($request_uri, PHP_URL_PATH);
+            $path = is_string($path) ? $path : '';
 
             if (($index = strpos($path, '/index.php')) !== false) {
-                $base = substr($path, 0, $index);
+                $script_name = substr($path, 0, $index + strlen('/index.php'));
+            } else {
+                $script_name = '/index.php';
             }
-
-            return ($base !== '' ? $base : '') . '/admin';
         }
+
+        return $script_name . '?route=' . rawurlencode($route);
     }
 
     private function cleanReturnUrl(string $url): string

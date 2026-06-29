@@ -169,7 +169,7 @@ site settings, subscriber preferences and delivery status.
 - Delivery reputation, SPF, DKIM and DMARC are controlled by the site's email
   provider and DNS configuration, not by this module.
 - Interface text is currently supplied in English.
-- Version 1.0.0-beta.5 is intended for testing with webtrees 2.2.6.
+- Version 1.0.0-beta.6 is intended for testing with webtrees 2.2.6.
 
 ## Licence
 

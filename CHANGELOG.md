@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0-beta.5 - 2026-06-28
+## 1.0.0-beta.6 - 2026-06-28
 
 - Fixes the administrator tree selector so the selected tree is read from both query and route attributes.
 - Adds a breadcrumb and Control panel link to the module settings page.
