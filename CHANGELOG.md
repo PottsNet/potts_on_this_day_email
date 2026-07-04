@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.0 - 2026-07-05
+
+- Promotes the tested 1.0.0-beta.10 build to a regular stable release.
+- Fixes compound relationship wording so an in-law relationship uses the gender of the intermediate relative, for example `niece's husband` instead of `nephew's husband`.
+- Adds a most recent daily email send report to the settings page, showing recipients, email addresses, event counts and send status from the scheduler log.
+- Improves scheduler logging so future runs include subscriber name and email details.
+- Confirms the public release package excludes runtime settings, subscriber data, scheduler tokens, locks and logs.
+
+## 1.0.0-beta.10 - 2026-07-04
+
+- Fixed compound relationship wording so an in-law relationship uses the gender of the intermediate relative, for example `niece's husband` instead of `nephew's husband`.
+- Added a most recent daily email send report to the settings page, showing recipients, email addresses, event counts and send status from the scheduler log.
+- Improved scheduler logging so future runs include subscriber name and email details.
+
+## 1.0.0-beta.9 - 2026-06-29
+
+- Adds starter translations for Polish and Portuguese.
+- Keeps the existing Dutch, German, French and Spanish starter translations.
+- Updates documentation for the expanded language coverage.
+
+## 1.0.0-beta.7 - 2026-06-29
+
+- Adds starter translations for Dutch, German, French and Spanish.
+- Wires module interface strings through webtrees translation handling.
+- Covers the settings page, My Page block, daily email headings, scheduler help, status messages and common alerts.
+- Keeps the module name as the public brand while translating surrounding labels and descriptions.
+- Notes that native-speaker corrections are welcome.
+
 ## 1.0.0-beta.6 - 2026-06-28
 
 - Fixes the administrator tree selector so the selected tree is read from both query and route attributes.

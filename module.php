@@ -46,14 +46,17 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     /** @var array<string, array<int, string>|null> */
     private array $relationship_path_cache = [];
 
+    /** @var array<string, array{labels: array<int, string>, individuals: array<int, Individual>}|null> */
+    private array $relationship_path_detail_cache = [];
+
     public function title(): string
     {
-        return 'Potts On This Day Email';
+        return I18N::translate('Potts On This Day Email');
     }
 
     public function description(): string
     {
-        return 'Send personalised On This Day emails to registered users who opt in, using webtrees email delivery and each subscriber’s privacy permissions.';
+        return I18N::translate('Send personalised On This Day emails to registered users who opt in, using webtrees email delivery and each subscriber’s privacy permissions.');
     }
 
     public function customModuleAuthorName(): string
@@ -63,7 +66,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     public function customModuleVersion(): string
     {
-        return '1.0.0-beta.6';
+        return '1.0.0';
     }
 
     public function customModuleLatestVersion(): string
@@ -73,7 +76,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     public function customModuleLatestVersionUrl(): string
     {
-        return '';
+        return 'https://raw.githubusercontent.com/PottsNet/potts_on_this_day_email/main/latest-version.txt';
     }
 
     public function customModuleSupportUrl(): string
@@ -83,7 +86,24 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     public function customTranslations(string $language): array
     {
-        return [];
+        $translations = require __DIR__ . '/resources/lang/translations.php';
+
+        return is_array($translations[$language] ?? null) ? $translations[$language] : [];
+    }
+
+    private function t(string $text, mixed ...$args): string
+    {
+        return I18N::translate($text, ...$args);
+    }
+
+    private function te(string $text, mixed ...$args): string
+    {
+        return $this->esc($this->t($text, ...$args));
+    }
+
+    private function alertHtml(string $level, string $message, mixed ...$args): string
+    {
+        return '<p class="alert alert-' . $level . ' mb-3">' . $this->te($message, ...$args) . '</p>';
     }
 
     public function getAdminAction(ServerRequestInterface $request): ResponseInterface
@@ -121,6 +141,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             'version'        => $this->customModuleVersion(),
             'subscriber_html'=> $selected_tree instanceof Tree ? $this->subscriberDetailsHtml($selected_tree) : '',
             'scheduler_html' => $selected_tree instanceof Tree ? $this->schedulerDetailsHtml($selected_tree, $settings) : '',
+            'recent_send_html' => $selected_tree instanceof Tree ? $this->recentSendLogHtml($selected_tree) : '',
         ]);
     }
 
@@ -138,7 +159,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $tree = $this->treeFromName($tree_name);
 
         if (!$tree instanceof Tree) {
-            return $this->adminRedirect('', ['error' => 'Choose a valid family tree.'], $return_url);
+            return $this->adminRedirect('', ['error' => $this->t('Choose a valid family tree.')], $return_url);
         }
 
         $settings = $this->settings();
@@ -148,7 +169,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             $settings['token'] = bin2hex(random_bytes(24));
 
             if (!$this->saveSettings($settings)) {
-                return $this->adminRedirect($tree->name(), ['error' => 'The scheduler settings could not be saved. Check that the module data directory is writable.'], $return_url);
+                return $this->adminRedirect($tree->name(), ['error' => $this->t('The scheduler settings could not be saved. Check that the module data directory is writable.')], $return_url);
             }
 
             return $this->adminRedirect($tree->name(), [$task === 'reset_token' ? 'token_reset' : 'prepared' => '1'], $return_url);
@@ -165,11 +186,11 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             : '';
 
         if (!in_array($timezone, timezone_identifiers_list(), true)) {
-            return $this->adminRedirect($tree->name(), ['error' => 'Enter a valid PHP timezone, such as Australia/Melbourne or Europe/London.'], $return_url);
+            return $this->adminRedirect($tree->name(), ['error' => $this->t('Enter a valid PHP timezone, such as Australia/Melbourne or Europe/London.')], $return_url);
         }
 
         if (filter_var($sender_email, FILTER_VALIDATE_EMAIL) === false) {
-            return $this->adminRedirect($tree->name(), ['error' => 'Enter a valid sender email address.'], $return_url);
+            return $this->adminRedirect($tree->name(), ['error' => $this->t('Enter a valid sender email address.')], $return_url);
         }
 
         $settings['timezone'] = $timezone;
@@ -177,7 +198,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $settings['sender_name'] = $sender_name !== '' ? $sender_name : $sender_email;
 
         if (!$this->saveSettings($settings)) {
-            return $this->adminRedirect($tree->name(), ['error' => 'The settings could not be saved. Check that the module data directory is writable.'], $return_url);
+            return $this->adminRedirect($tree->name(), ['error' => $this->t('The settings could not be saved. Check that the module data directory is writable.')], $return_url);
         }
 
         return $this->adminRedirect($tree->name(), ['saved' => '1'], $return_url);
@@ -212,16 +233,16 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             if ($personal_ready) {
                 $alert .= $this->handleManualSend($tree, 'me', $facts, $personal_relationship_settings);
             } else {
-                $alert .= '<p class="alert alert-warning mb-3">Choose your individual ID and save your settings before sending yourself a test email.</p>';
+                $alert .= $this->alertHtml('warning', 'Choose your individual ID and save your settings before sending yourself a test email.');
             }
         }
 
         if (!$is_signed_in) {
-            $content = '<p class="text-muted mb-0">Sign in to choose your daily email settings.</p>';
+            $content = '<p class="text-muted mb-0">' . $this->te('Sign in to choose your daily email settings.') . '</p>';
         } elseif (!$personal_ready) {
-            $content = '<p class="text-muted mb-0">Choose your individual ID and save your settings to see today\'s matching family events.</p>';
+            $content = '<p class="text-muted mb-0">' . $this->te("Choose your individual ID and save your settings to see today's matching family events.") . '</p>';
         } elseif ($facts->isEmpty()) {
-            $content = '<p class="text-muted mb-0">No births, deaths or marriages were found for today after applying your current relationship filter.</p>';
+            $content = '<p class="text-muted mb-0">' . $this->te('No births, deaths or marriages were found for today after applying your current relationship filter.') . '</p>';
         } else {
             $content = view('lists/anniversaries-table', [
                 'facts'      => $facts,
@@ -236,20 +257,20 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         if ($is_signed_in) {
             if (Auth::isAdmin($user)) {
-                $buttons .= '<p class="mb-2"><a class="btn btn-outline-secondary" href="' . $this->esc($this->moduleAdminUrl($tree, [], $this->currentPageUrl([]))) . '">On This Day Email settings</a></p>';
+                $buttons .= '<p class="mb-2"><a class="btn btn-outline-secondary" href="' . $this->esc($this->moduleAdminUrl($tree, [], $this->currentPageUrl([]))) . '">' . $this->te('On This Day Email settings') . '</a></p>';
             }
             if ($personal_ready) {
-                $buttons .= '<p class="mb-2"><a class="btn btn-primary" href="' . $this->esc($this->sendUrl($block_id, 'me')) . '">Send test email to my webtrees account</a></p>';
+                $buttons .= '<p class="mb-2"><a class="btn btn-primary" href="' . $this->esc($this->sendUrl($block_id, 'me')) . '">' . $this->te('Send test email to my webtrees account') . '</a></p>';
             }
             $personal_html = $this->userRelationshipSettingsHtml($tree, $user, $personal_relationship_settings, $block_id);
         } else {
-            $personal_html = '<p class="alert alert-info mb-3">Sign in to choose whether you want a daily email and to set your relationship distance.</p>';
+            $personal_html = $this->alertHtml('info', 'Sign in to choose whether you want a daily email and to set your relationship distance.');
         }
 
         return '<div class="card wt-block potts-on-this-day-email-preview mb-3">'
-            . '<div class="card-header"><h2 class="card-title h4 mb-0">On This Day daily email</h2></div>'
+            . '<div class="card-header"><h2 class="card-title h4 mb-0">' . $this->te('On This Day daily email') . '</h2></div>'
             . '<div class="card-body">'
-            . '<div class="alert alert-info small mb-3"><strong>What this block does:</strong> It lets you choose whether you want a daily On This Day email. The email includes births, deaths and marriages from the family tree that happened on today\'s date, filtered around the person and relationship distance you choose below. You will only receive an email on days where there is something to report.</div>'
+            . '<div class="alert alert-info small mb-3"><strong>' . $this->te('What this block does:') . '</strong> ' . $this->te("It lets you choose whether you want a daily On This Day email. The email includes births, deaths and marriages from the family tree that happened on today's date, filtered around the person and relationship distance you choose below. You will only receive an email on days where there is something to report.") . '</div>'
             . $alert
             . $buttons
             . $personal_html
@@ -323,7 +344,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     private function runDailyForSubscribers(Tree $tree, array $settings, array $opted_in_users): ResponseInterface
     {
         $today_key = $this->localDateKey();
-        $subject = 'On this day in the family tree - ' . $this->localDateHeading();
+        $subject = $this->t('On this day in the family tree') . ' - ' . $this->localDateHeading();
         $sender = $this->senderFromSettings($settings, $opted_in_users[0]['recipient'] ?? ['email' => '', 'name' => '']);
         $sent = 0;
         $failed = [];
@@ -338,7 +359,8 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                 $user_facts = $this->todayFacts($tree, $user_settings);
                 $event_count = $user_facts->count();
 
-                $this->schedulerLog('Subscriber checked: user_id=' . (string) $opted_in['user_id'] . ', events found=' . $event_count . '.');
+                $subscriber_label = $this->subscriberLogLabel($opted_in);
+                $this->schedulerLog('Subscriber checked: ' . $subscriber_label . ', events found=' . $event_count . '.');
 
                 if ($user_facts->isEmpty()) {
                     return ['sent' => 0, 'failed' => [], 'event_count' => 0, 'skipped_no_events' => 1];
@@ -348,9 +370,15 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                     $sender,
                     [$opted_in['recipient']],
                     $subject,
-                    $this->emailText($tree, $user_facts, $user_settings, 'Relationship to you'),
-                    $this->emailHtml($tree, $user_facts, $user_settings, 'Relationship to you')
+                    $this->emailText($tree, $user_facts, $user_settings, $this->t('Relationship to you')),
+                    $this->emailHtml($tree, $user_facts, $user_settings, $this->t('Relationship to you'))
                 );
+
+                if ((int) $user_result['sent'] > 0) {
+                    $this->schedulerLog('Subscriber emailed: ' . $subscriber_label . ', events sent=' . $event_count . '.');
+                } else {
+                    $this->schedulerLog('Subscriber email failed: ' . $subscriber_label . ', events found=' . $event_count . ', failed=' . implode(',', $user_result['failed']) . '.');
+                }
 
                 return [
                     'sent' => $user_result['sent'],
@@ -459,7 +487,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         }
 
         if (!Auth::isManager($tree)) {
-            return '<p class="alert alert-danger mb-3">Only a tree manager or administrator can change the relationship filter.</p>';
+            return $this->alertHtml('danger', 'Only a tree manager or administrator can change the relationship filter.');
         }
 
         $root_xref = strtoupper(trim((string) ($_GET['potts_otd_relationship_root_xref'] ?? '')));
@@ -472,10 +500,10 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $settings['relationship_max_steps'] = (string) $max_steps;
 
         if (!$this->saveSettings($settings)) {
-            return '<p class="alert alert-danger mb-3">Could not save the relationship filter settings. Check that <code>modules_v4/potts_on_this_day_email/data/</code> is writable.</p>';
+            return '<p class="alert alert-danger mb-3">' . $this->t('Could not save the relationship filter settings. Check that %s is writable.', '<code>modules_v4/potts_on_this_day_email/data/</code>') . '</p>';
         }
 
-        return '<p class="alert alert-success mb-3">Relationship filter updated.</p>';
+        return $this->alertHtml('success', 'Relationship filter updated.');
     }
 
     private function handleUserRelationshipSettingsRequest(Tree $tree, int $block_id, UserInterface $user): string
@@ -490,7 +518,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         }
 
         if ($user->id() <= 0) {
-            return '<p class="alert alert-danger mb-3">You need to be signed in to save your relationship settings.</p>';
+            return $this->alertHtml('danger', 'You need to be signed in to save your relationship settings.');
         }
 
         $daily_email_enabled = (string) ($_GET['potts_otd_user_daily_email_enabled'] ?? '') === '1';
@@ -501,16 +529,16 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         $root_candidate = $root_xref !== '' ? Registry::individualFactory()->make($root_xref, $tree) : null;
         if ($root_xref !== '' && !$root_candidate instanceof Individual) {
-            return '<p class="alert alert-danger mb-3">The root individual ID <code>' . $this->esc($root_xref) . '</code> was not found in this tree.</p>';
+            return '<p class="alert alert-danger mb-3">' . $this->t('The root individual ID %s was not found in this tree.', '<code>' . $this->esc($root_xref) . '</code>') . '</p>';
         }
 
         $recipient_email = $this->plain($user->email());
         if ($daily_email_enabled && filter_var($recipient_email, FILTER_VALIDATE_EMAIL) === false) {
-            return '<p class="alert alert-danger mb-3">Your webtrees account does not have a valid email address, so daily email cannot be turned on.</p>';
+            return $this->alertHtml('danger', 'Your webtrees account does not have a valid email address, so daily email cannot be turned on.');
         }
 
         if ($daily_email_enabled && $root_xref === '') {
-            return '<p class="alert alert-danger mb-3">Choose your individual ID before turning on the daily email.</p>';
+            return $this->alertHtml('danger', 'Choose your individual ID before turning on the daily email.');
         }
 
         $settings = [
@@ -524,10 +552,10 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         ];
 
         if (!$this->saveUserRelationshipSettings($tree, $user, $settings)) {
-            return '<p class="alert alert-danger mb-3">Could not save your relationship filter settings. Check that <code>modules_v4/potts_on_this_day_email/data/</code> is writable.</p>';
+            return '<p class="alert alert-danger mb-3">' . $this->t('Could not save your relationship filter settings. Check that %s is writable.', '<code>modules_v4/potts_on_this_day_email/data/</code>') . '</p>';
         }
 
-        return '<p class="alert alert-success mb-3">Your personal On This Day settings have been updated.</p>';
+        return $this->alertHtml('success', 'Your personal On This Day settings have been updated.');
     }
 
     private function userRelationshipSettingsHtml(Tree $tree, UserInterface $user, array $settings, int $block_id): string
@@ -540,11 +568,11 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $root = $root_xref !== '' ? Registry::individualFactory()->make($root_xref, $tree) : null;
         $root_label = $root instanceof Individual
             ? $this->plain($root->fullName()) . ' (' . $root->xref() . ')'
-            : ($root_xref !== '' ? 'Record not found: ' . $root_xref : 'No root person selected yet');
+            : ($root_xref !== '' ? $this->t('Record not found: %s', $root_xref) : $this->t('No root person selected yet'));
 
         $linked_text = $linked_xref !== ''
-            ? 'Your linked webtrees individual appears to be <code>' . $this->esc($linked_xref) . '</code>.'
-            : 'Your webtrees account does not appear to be linked to an individual record, so enter your individual ID manually.';
+            ? $this->t('Your linked webtrees individual appears to be %s.', '<code>' . $this->esc($linked_xref) . '</code>')
+            : $this->t('Your webtrees account does not appear to be linked to an individual record, so enter your individual ID manually.');
 
         $daily_email_checked = $daily_email_enabled ? ' checked' : '';
         $relationship_checked = $enabled ? ' checked' : '';
@@ -558,31 +586,31 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                 'potts_otd_user_relationship_root_xref' => $linked_xref,
                 'potts_otd_user_relationship_max_steps' => (string) $max_steps,
             ]);
-            $use_linked_button = '<p class="mb-2"><a class="btn btn-sm btn-outline-secondary" href="' . $this->esc($use_linked_url) . '">Use my linked individual as root</a></p>';
+            $use_linked_button = '<p class="mb-2"><a class="btn btn-sm btn-outline-secondary" href="' . $this->esc($use_linked_url) . '">' . $this->te('Use my linked individual as root') . '</a></p>';
         }
 
         $email_badge = $daily_email_enabled
-            ? '<span class="badge bg-success">Daily email on</span>'
-            : '<span class="badge bg-secondary">Daily email off</span>';
+            ? '<span class="badge bg-success">' . $this->te('Daily email on') . '</span>'
+            : '<span class="badge bg-secondary">' . $this->te('Daily email off') . '</span>';
 
         return '<div class="card mb-3">'
-            . '<div class="card-header"><strong>My On This Day daily email</strong> ' . $email_badge . '</div>'
+            . '<div class="card-header"><strong>' . $this->te('My On This Day daily email') . '</strong> ' . $email_badge . '</div>'
             . '<div class="card-body small">'
-            . '<p class="mb-2"><strong>What happens if I turn on daily email?</strong> You will receive your own personalised On This Day summary at your webtrees account email address. It is only sent on days where there are matching family events for your settings. You can turn it off here at any time.</p>'
-            . '<p class="mb-2"><strong>Current root:</strong> ' . $this->esc($root_label) . '</p>'
+            . '<p class="mb-2"><strong>' . $this->te('What happens if I turn on daily email?') . '</strong> ' . $this->te('You will receive your own personalised On This Day summary at your webtrees account email address. It is only sent on days where there are matching family events for your settings. You can turn it off here at any time.') . '</p>'
+            . '<p class="mb-2"><strong>' . $this->te('Current root:') . '</strong> ' . $this->esc($root_label) . '</p>'
             . '<p class="text-muted mb-2">' . $linked_text . '</p>'
             . $use_linked_button
             . '<form method="get" action="' . $this->esc($this->currentPagePath()) . '" class="border rounded p-3 bg-light">'
             . $this->currentQueryHiddenFields(['potts_otd_user_relationship_action' => 'save', 'potts_otd_block_id' => (string) $block_id])
             . '<div class="row g-2 align-items-end">'
-            . '<div class="col-md-3"><div class="form-check mb-2"><input class="form-check-input" id="potts_otd_user_daily_email_enabled" name="potts_otd_user_daily_email_enabled" type="checkbox" value="1"' . $daily_email_checked . '><label class="form-check-label" for="potts_otd_user_daily_email_enabled">Email me daily</label></div></div>'
-            . '<div class="col-md-3"><div class="form-check mb-2"><input class="form-check-input" id="potts_otd_user_relationship_enabled" name="potts_otd_user_relationship_enabled" type="checkbox" value="1"' . $relationship_checked . '><label class="form-check-label" for="potts_otd_user_relationship_enabled">Use relationship filter</label></div></div>'
-            . '<div class="col-md-3"><label class="form-label" for="potts_otd_user_relationship_root_xref">My individual ID</label><input class="form-control" id="potts_otd_user_relationship_root_xref" name="potts_otd_user_relationship_root_xref" type="text" value="' . $this->esc($root_xref) . '" placeholder="X123"></div>'
-            . '<div class="col-md-3"><label class="form-label" for="potts_otd_user_relationship_max_steps">Maximum steps</label><input class="form-control" id="potts_otd_user_relationship_max_steps" name="potts_otd_user_relationship_max_steps" type="number" min="0" max="20" value="' . $this->esc((string) $max_steps) . '"></div>'
-            . '<div class="col-md-3"><button type="submit" class="btn btn-success w-100">Save</button></div>'
+            . '<div class="col-md-3"><div class="form-check mb-2"><input class="form-check-input" id="potts_otd_user_daily_email_enabled" name="potts_otd_user_daily_email_enabled" type="checkbox" value="1"' . $daily_email_checked . '><label class="form-check-label" for="potts_otd_user_daily_email_enabled">' . $this->te('Email me daily') . '</label></div></div>'
+            . '<div class="col-md-3"><div class="form-check mb-2"><input class="form-check-input" id="potts_otd_user_relationship_enabled" name="potts_otd_user_relationship_enabled" type="checkbox" value="1"' . $relationship_checked . '><label class="form-check-label" for="potts_otd_user_relationship_enabled">' . $this->te('Use relationship filter') . '</label></div></div>'
+            . '<div class="col-md-3"><label class="form-label" for="potts_otd_user_relationship_root_xref">' . $this->te('My individual ID') . '</label><input class="form-control" id="potts_otd_user_relationship_root_xref" name="potts_otd_user_relationship_root_xref" type="text" value="' . $this->esc($root_xref) . '" placeholder="X123"></div>'
+            . '<div class="col-md-3"><label class="form-label" for="potts_otd_user_relationship_max_steps">' . $this->te('Maximum steps') . '</label><input class="form-control" id="potts_otd_user_relationship_max_steps" name="potts_otd_user_relationship_max_steps" type="number" min="0" max="20" value="' . $this->esc((string) $max_steps) . '"></div>'
+            . '<div class="col-md-3"><button type="submit" class="btn btn-success w-100">' . $this->te('Save') . '</button></div>'
             . '</div>'
             . '</form>'
-            . '<p class="text-muted mt-2 mb-0">These settings are personal to your webtrees login. You will only receive emails if you tick Email me daily and there are matching family events. The site manager can still maintain a separate list for family update emails.</p>'
+            . '<p class="text-muted mt-2 mb-0">' . $this->te('These settings are personal to your webtrees login. You will only receive emails if you tick Email me daily and there are matching family events. The site manager can still maintain a separate list for family update emails.') . '</p>'
             . '</div>'
             . '</div>';
     }
@@ -595,25 +623,25 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $root = Registry::individualFactory()->make($root_xref, $tree);
         $root_label = $root instanceof Individual
             ? $this->plain($root->fullName()) . ' (' . $root->xref() . ')'
-            : 'Record not found: ' . $root_xref;
+            : $this->t('Record not found: %s', $root_xref);
 
         $checked = $enabled ? ' checked' : '';
 
         return '<div class="card mb-3">'
-            . '<div class="card-header"><strong>Manual recipient relationship filter</strong></div>'
+            . '<div class="card-header"><strong>' . $this->te('Manual recipient relationship filter') . '</strong></div>'
             . '<div class="card-body small">'
-            . '<p class="mb-2">This only applies to the optional manual email recipient list. Registered users who tick Email me daily use their own personal settings instead. For marriage events, the marriage is included when either spouse is within the limit.</p>'
-            . '<p class="mb-2"><strong>Current root:</strong> ' . $this->esc($root_label) . '</p>'
+            . '<p class="mb-2">' . $this->te('This only applies to the optional manual email recipient list. Registered users who tick Email me daily use their own personal settings instead. For marriage events, the marriage is included when either spouse is within the limit.') . '</p>'
+            . '<p class="mb-2"><strong>' . $this->te('Current root:') . '</strong> ' . $this->esc($root_label) . '</p>'
             . '<form method="get" action="' . $this->esc($this->currentPagePath()) . '" class="border rounded p-3 bg-light">'
             . $this->currentQueryHiddenFields(['potts_otd_relationship_action' => 'save', 'potts_otd_block_id' => (string) $block_id])
             . '<div class="row g-2 align-items-end">'
-            . '<div class="col-md-3"><div class="form-check mb-2"><input class="form-check-input" id="potts_otd_relationship_enabled" name="potts_otd_relationship_enabled" type="checkbox" value="1"' . $checked . '><label class="form-check-label" for="potts_otd_relationship_enabled">Enable filter</label></div></div>'
-            . '<div class="col-md-3"><label class="form-label" for="potts_otd_relationship_root_xref">Root individual ID</label><input class="form-control" id="potts_otd_relationship_root_xref" name="potts_otd_relationship_root_xref" type="text" value="' . $this->esc($root_xref) . '" placeholder="X123"></div>'
-            . '<div class="col-md-3"><label class="form-label" for="potts_otd_relationship_max_steps">Maximum steps</label><input class="form-control" id="potts_otd_relationship_max_steps" name="potts_otd_relationship_max_steps" type="number" min="0" max="20" value="' . $this->esc((string) $max_steps) . '"></div>'
-            . '<div class="col-md-3"><button type="submit" class="btn btn-success w-100">Save filter</button></div>'
+            . '<div class="col-md-3"><div class="form-check mb-2"><input class="form-check-input" id="potts_otd_relationship_enabled" name="potts_otd_relationship_enabled" type="checkbox" value="1"' . $checked . '><label class="form-check-label" for="potts_otd_relationship_enabled">' . $this->te('Enable filter') . '</label></div></div>'
+            . '<div class="col-md-3"><label class="form-label" for="potts_otd_relationship_root_xref">' . $this->te('Root individual ID') . '</label><input class="form-control" id="potts_otd_relationship_root_xref" name="potts_otd_relationship_root_xref" type="text" value="' . $this->esc($root_xref) . '" placeholder="X123"></div>'
+            . '<div class="col-md-3"><label class="form-label" for="potts_otd_relationship_max_steps">' . $this->te('Maximum steps') . '</label><input class="form-control" id="potts_otd_relationship_max_steps" name="potts_otd_relationship_max_steps" type="number" min="0" max="20" value="' . $this->esc((string) $max_steps) . '"></div>'
+            . '<div class="col-md-3"><button type="submit" class="btn btn-success w-100">' . $this->te('Save filter') . '</button></div>'
             . '</div>'
             . '</form>'
-            . '<p class="text-muted mt-2 mb-0">Choose an individual from this tree and a maximum relationship distance.</p>'
+            . '<p class="text-muted mt-2 mb-0">' . $this->te('Choose an individual from this tree and a maximum relationship distance.') . '</p>'
             . '</div>'
             . '</div>';
     }
@@ -630,7 +658,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         }
 
         if (!Auth::isManager($tree)) {
-            return '<p class="alert alert-danger mb-3">Only a tree manager or administrator can manage recipients.</p>';
+            return $this->alertHtml('danger', 'Only a tree manager or administrator can manage recipients.');
         }
 
         $recipients = $this->readRecipients();
@@ -640,21 +668,21 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             $name = trim((string) ($_GET['potts_otd_recipient_name'] ?? ''));
 
             if (filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
-                return '<p class="alert alert-danger mb-3">That email address does not look valid.</p>';
+                return $this->alertHtml('danger', 'That email address does not look valid.');
             }
 
             foreach ($recipients as $recipient) {
                 if (strcasecmp($recipient['email'], $email) === 0) {
-                    return '<p class="alert alert-warning mb-3">That email address is already in the recipient list.</p>';
+                    return $this->alertHtml('warning', 'That email address is already in the recipient list.');
                 }
             }
 
             $recipients[] = ['email' => $email, 'name' => $this->plain($name)];
             if (!$this->saveRecipients($recipients)) {
-                return '<p class="alert alert-danger mb-3">Could not save the recipient list. Check that <code>modules_v4/potts_on_this_day_email/data/</code> is writable.</p>';
+                return '<p class="alert alert-danger mb-3">' . $this->t('Could not save the recipient list. Check that %s is writable.', '<code>modules_v4/potts_on_this_day_email/data/</code>') . '</p>';
             }
 
-            return '<p class="alert alert-success mb-3">Recipient added: <code>' . $this->esc($email) . '</code></p>';
+            return '<p class="alert alert-success mb-3">' . $this->t('Recipient added: %s', '<code>' . $this->esc($email) . '</code>') . '</p>';
         }
 
         if ($action === 'remove') {
@@ -671,14 +699,14 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             }
 
             if (!$removed) {
-                return '<p class="alert alert-warning mb-3">That recipient was not found.</p>';
+                return $this->alertHtml('warning', 'That recipient was not found.');
             }
 
             if (!$this->saveRecipients($new)) {
-                return '<p class="alert alert-danger mb-3">Could not save the recipient list. Check that <code>modules_v4/potts_on_this_day_email/data/</code> is writable.</p>';
+                return '<p class="alert alert-danger mb-3">' . $this->t('Could not save the recipient list. Check that %s is writable.', '<code>modules_v4/potts_on_this_day_email/data/</code>') . '</p>';
             }
 
-            return '<p class="alert alert-success mb-3">Recipient removed: <code>' . $this->esc($email) . '</code></p>';
+            return '<p class="alert alert-success mb-3">' . $this->t('Recipient removed: %s', '<code>' . $this->esc($email) . '</code>') . '</p>';
         }
 
         return '';
@@ -690,21 +718,21 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         if ($mode === 'configured') {
             if (!Auth::isManager($tree)) {
-                return '<p class="alert alert-danger mb-3">Only a tree manager or administrator can send to manual recipients.</p>';
+                return $this->alertHtml('danger', 'Only a tree manager or administrator can send to manual recipients.');
             }
 
             $recipients = $this->readRecipients();
             if ($recipients === []) {
-                return '<p class="alert alert-danger mb-3">No manual recipients were found.</p>';
+                return $this->alertHtml('danger', 'No manual recipients were found.');
             }
         } else {
             if ($user->id() <= 0) {
-                return '<p class="alert alert-danger mb-3">You need to be signed in to send a test email to yourself.</p>';
+                return $this->alertHtml('danger', 'You need to be signed in to send a test email to yourself.');
             }
 
             $recipient_email = $user->email();
             if ($recipient_email === '' || filter_var($recipient_email, FILTER_VALIDATE_EMAIL) === false) {
-                return '<p class="alert alert-danger mb-3">Your signed-in webtrees account email address is missing or invalid.</p>';
+                return $this->alertHtml('danger', 'Your signed-in webtrees account email address is missing or invalid.');
             }
 
             $recipients = [[
@@ -714,12 +742,12 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         }
 
         if ($facts->isEmpty()) {
-            return '<p class="alert alert-info mb-3">No births, deaths or marriages were found for today, so no test email was sent.</p>';
+            return $this->alertHtml('info', 'No births, deaths or marriages were found for today, so no test email was sent.');
         }
 
-        $subject = 'On this day in the family tree - ' . $this->localDateHeading();
+        $subject = $this->t('On this day in the family tree') . ' - ' . $this->localDateHeading();
         $relationship_settings ??= $this->settings();
-        $relationship_label = $mode === 'me' ? 'Relationship to you' : $this->relationshipLabelForSettings($tree, $relationship_settings);
+        $relationship_label = $mode === 'me' ? $this->t('Relationship to you') : $this->relationshipLabelForSettings($tree, $relationship_settings);
         $text = $this->emailText($tree, $facts, $relationship_settings, $relationship_label);
         $html = $this->emailHtml($tree, $facts, $relationship_settings, $relationship_label);
         $sender = $this->senderFromSettings($this->settings(), $recipients[0]);
@@ -727,10 +755,10 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         if ($result['sent'] > 0) {
             $message = $mode === 'configured'
-                ? 'Test email sent to ' . $result['sent'] . ' manual recipient(s).'
-                : 'Test email sent to your webtrees account.';
+                ? $this->t('Test email sent to %s manual recipient(s).', (string) $result['sent'])
+                : $this->t('Test email sent to your webtrees account.');
             if ($result['failed'] !== []) {
-                $message .= ' Failed: ' . implode('; ', $result['failed']);
+                $message .= ' ' . $this->t('Failed:') . ' ' . implode('; ', $result['failed']);
             }
             return '<p class="alert alert-success mb-3">' . $this->esc($message) . '</p>';
         }
@@ -746,9 +774,9 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         if (!is_array($tree_settings) || $tree_settings === []) {
             return '<div class="card mb-3">'
-                . '<div class="card-header"><strong>Registered user daily email subscribers</strong></div>'
+                . '<div class="card-header"><strong>' . $this->te('Registered user daily email subscribers') . '</strong></div>'
                 . '<div class="card-body small">'
-                . '<p class="text-muted mb-0">No registered users have saved personal On This Day settings yet.</p>'
+                . '<p class="text-muted mb-0">' . $this->te('No registered users have saved personal On This Day settings yet.') . '</p>'
                 . '</div>'
                 . '</div>';
         }
@@ -770,7 +798,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             $root_xref = strtoupper(trim((string) ($settings['relationship_root_xref'] ?? '')));
             $max_steps = (string) ($settings['relationship_max_steps'] ?? '4');
             $updated = trim((string) ($settings['updated'] ?? ''));
-            $relationship_filter = (string) ($settings['relationship_filter_enabled'] ?? '1') === '1' ? 'On' : 'Off';
+            $relationship_filter = (string) ($settings['relationship_filter_enabled'] ?? '1') === '1' ? $this->t('On') : $this->t('Off');
 
             $root_label = $root_xref !== '' ? $root_xref : '-';
             if ($root_xref !== '') {
@@ -778,26 +806,26 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                 if ($root instanceof Individual) {
                     $root_label = $this->plain($root->fullName()) . ' (' . $root->xref() . ')';
                 } else {
-                    $root_label = 'Not found: ' . $root_xref;
+                    $root_label = $this->t('Not found: %s', $root_xref);
                 }
             }
 
             $status_parts = [];
             if (filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
-                $status_parts[] = 'invalid email';
+                $status_parts[] = $this->t('invalid email');
             }
             if ($root_xref === '') {
-                $status_parts[] = 'no root individual';
+                $status_parts[] = $this->t('no root individual');
             } elseif (!Registry::individualFactory()->make($root_xref, $tree) instanceof Individual) {
-                $status_parts[] = 'root not found';
+                $status_parts[] = $this->t('root not found');
             }
 
-            $status = $status_parts === [] ? 'Ready' : 'Will be skipped: ' . implode(', ', $status_parts);
+            $status = $status_parts === [] ? $this->t('Ready') : $this->t('Will be skipped: %s', implode(', ', $status_parts));
             $badge = $status_parts === []
-                ? '<span class="badge bg-success">Ready</span>'
+                ? '<span class="badge bg-success">' . $this->te('Ready') . '</span>'
                 : '<span class="badge bg-warning text-dark">' . $this->esc($status) . '</span>';
 
-            $display_name = $name !== '' ? $name : '(no saved name)';
+            $display_name = $name !== '' ? $name : $this->t('(no saved name)');
             $rows .= '<tr>'
                 . '<td>' . $this->esc((string) $user_id) . '</td>'
                 . '<td>' . $this->esc($display_name) . '</td>'
@@ -811,13 +839,13 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         }
 
         if ($count === 0) {
-            $body = '<p class="text-muted mb-0">No registered users have ticked <strong>Email me daily</strong> for this tree yet.</p>';
+            $body = '<p class="text-muted mb-0">' . $this->t('No registered users have ticked %s for this tree yet.', '<strong>' . $this->te('Email me daily') . '</strong>') . '</p>';
         } else {
-            $body = '<p class="mb-2">These are registered users who have ticked <strong>Email me daily</strong>. They receive their own personalised email when the daily email is sent.</p>'
+            $body = '<p class="mb-2">' . $this->t('These are registered users who have ticked %s. They receive their own personalised email when the daily email is sent.', '<strong>' . $this->te('Email me daily') . '</strong>') . '</p>'
                 . '<div class="table-responsive">'
                 . '<table class="table table-sm table-striped align-middle">'
                 . '<thead><tr>'
-                . '<th>User ID</th><th>Name</th><th>Email</th><th>Root individual</th><th>Filter</th><th>Steps</th><th>Updated</th><th>Status</th>'
+                . '<th>' . $this->te('User ID') . '</th><th>' . $this->te('Name') . '</th><th>' . $this->te('Email') . '</th><th>' . $this->te('Root individual') . '</th><th>' . $this->te('Filter') . '</th><th>' . $this->te('Steps') . '</th><th>' . $this->te('Updated') . '</th><th>' . $this->te('Status') . '</th>'
                 . '</tr></thead>'
                 . '<tbody>' . $rows . '</tbody>'
                 . '</table>'
@@ -825,7 +853,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         }
 
         return '<div class="card mb-3">'
-            . '<div class="card-header"><strong>Registered user daily email subscribers</strong> <span class="badge bg-secondary">' . $this->esc((string) $count) . '</span></div>'
+            . '<div class="card-header"><strong>' . $this->te('Registered user daily email subscribers') . '</strong> <span class="badge bg-secondary">' . $this->esc((string) $count) . '</span></div>'
             . '<div class="card-body small">'
             . $body
             . '</div>'
@@ -838,7 +866,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         $items = '';
         if ($recipients === []) {
-            $items = '<li class="text-muted">No valid recipients are configured yet.</li>';
+            $items = '<li class="text-muted">' . $this->te('No valid recipients are configured yet.') . '</li>';
         } else {
             foreach ($recipients as $recipient) {
                 $label = $recipient['name'] !== ''
@@ -852,27 +880,200 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
                 $items .= '<li class="d-flex align-items-center justify-content-between gap-2 mb-1">'
                     . '<code>' . $this->esc($label) . '</code>'
-                    . '<a class="btn btn-sm btn-outline-danger" href="' . $this->esc($remove_url) . '" onclick="return confirm(\'Remove this recipient?\')">Remove</a>'
+                    . '<a class="btn btn-sm btn-outline-danger" href="' . $this->esc($remove_url) . '" onclick="return confirm(&quot;' . $this->te('Remove this recipient?') . '&quot;)">' . $this->te('Remove') . '</a>'
                     . '</li>';
             }
         }
 
         return '<div class="card mb-3">'
-            . '<div class="card-header"><strong>Manual email recipients, optional</strong></div>'
+            . '<div class="card-header"><strong>' . $this->te('Manual email recipients, optional') . '</strong></div>'
             . '<div class="card-body small">'
-            . '<p class="mb-2">This optional list is for people you want to email manually even if they do not have their own webtrees login. Registered users should normally use their own Email me daily setting instead. This manual list is stored in <code>' . $this->esc($relative) . '</code>.</p>'
+            . '<p class="mb-2">' . $this->t('This optional list is for people you want to email manually even if they do not have their own webtrees login. Registered users should normally use their own Email me daily setting instead. This manual list is stored in %s.', '<code>' . $this->esc($relative) . '</code>') . '</p>'
             . '<ul class="list-unstyled mb-3">' . $items . '</ul>'
             . '<form method="get" action="' . $this->esc($this->currentPagePath()) . '" class="border rounded p-3 bg-light">'
             . $this->currentQueryHiddenFields(['potts_otd_recipient_action' => 'add', 'potts_otd_block_id' => (string) $block_id])
             . '<div class="row g-2 align-items-end">'
-            . '<div class="col-md-4"><label class="form-label" for="potts_otd_recipient_name">Name, optional</label><input class="form-control" id="potts_otd_recipient_name" name="potts_otd_recipient_name" type="text" placeholder="Example Person"></div>'
-            . '<div class="col-md-5"><label class="form-label" for="potts_otd_recipient_email">Email address</label><input class="form-control" id="potts_otd_recipient_email" name="potts_otd_recipient_email" type="email" placeholder="name@example.com" required></div>'
-            . '<div class="col-md-3"><button type="submit" class="btn btn-success w-100">Add recipient</button></div>'
+            . '<div class="col-md-4"><label class="form-label" for="potts_otd_recipient_name">' . $this->te('Name, optional') . '</label><input class="form-control" id="potts_otd_recipient_name" name="potts_otd_recipient_name" type="text" placeholder="Example Person"></div>'
+            . '<div class="col-md-5"><label class="form-label" for="potts_otd_recipient_email">' . $this->te('Email address') . '</label><input class="form-control" id="potts_otd_recipient_email" name="potts_otd_recipient_email" type="email" placeholder="name@example.com" required></div>'
+            . '<div class="col-md-3"><button type="submit" class="btn btn-success w-100">' . $this->te('Add recipient') . '</button></div>'
             . '</div>'
             . '</form>'
-            . '<p class="text-muted mt-2 mb-0">You can still edit the file manually in cPanel. Blank lines and lines starting with <code>#</code> are ignored.</p>'
+            . '<p class="text-muted mt-2 mb-0">' . $this->t('You can still edit the file manually in cPanel. Blank lines and lines starting with %s are ignored.', '<code>#</code>') . '</p>'
             . '</div>'
             . '</div>';
+    }
+
+    private function recentSendLogHtml(Tree $tree): string
+    {
+        $rows = $this->recentSendLogRows($tree);
+
+        if ($rows === []) {
+            return '<div class="card mb-3">'
+                . '<div class="card-header"><strong>' . $this->te('Most recent daily email send') . '</strong></div>'
+                . '<div class="card-body small">'
+                . '<p class="text-muted mb-0">' . $this->te('No recent daily email send details were found in the scheduler log yet.') . '</p>'
+                . '</div></div>';
+        }
+
+        $date = (string) ($rows[0]['run_time'] ?? '');
+        $summary = (string) ($rows[0]['summary'] ?? '');
+        $body_rows = '';
+
+        foreach ($rows as $row) {
+            $status_class = match ($row['status']) {
+                'sent' => 'success',
+                'failed' => 'danger',
+                default => 'secondary',
+            };
+            $status_label = match ($row['status']) {
+                'sent' => $this->t('Email sent'),
+                'failed' => $this->t('Failed'),
+                default => $this->t('No matching events'),
+            };
+
+            $body_rows .= '<tr>'
+                . '<td>' . $this->esc((string) $row['name']) . '</td>'
+                . '<td>' . $this->esc((string) $row['email']) . '</td>'
+                . '<td class="text-end">' . $this->esc((string) $row['events']) . '</td>'
+                . '<td><span class="badge bg-' . $status_class . '">' . $this->esc($status_label) . '</span></td>'
+                . '</tr>';
+        }
+
+        return '<div class="card mb-3">'
+            . '<div class="card-header"><strong>' . $this->te('Most recent daily email send') . '</strong></div>'
+            . '<div class="card-body small">'
+            . ($date !== '' ? '<p class="mb-2"><strong>' . $this->te('Run time:') . '</strong> ' . $this->esc($date) . '</p>' : '')
+            . ($summary !== '' ? '<p class="mb-2 text-muted">' . $this->esc($summary) . '</p>' : '')
+            . '<div class="table-responsive">'
+            . '<table class="table table-sm table-striped align-middle mb-0">'
+            . '<thead><tr><th>' . $this->te('Recipient') . '</th><th>' . $this->te('Email') . '</th><th class="text-end">' . $this->te('Relatives/events') . '</th><th>' . $this->te('Status') . '</th></tr></thead>'
+            . '<tbody>' . $body_rows . '</tbody>'
+            . '</table>'
+            . '</div>'
+            . '<p class="text-muted mt-2 mb-0">' . $this->t('This report is read from %s.', '<code>modules_v4/potts_on_this_day_email/data/scheduler.log</code>') . '</p>'
+            . '</div></div>';
+    }
+
+    /**
+     * @return array<int, array{name:string,email:string,events:int,status:string,run_time:string,summary:string}>
+     */
+    private function recentSendLogRows(Tree $tree): array
+    {
+        $path = $this->schedulerLogPath();
+        if (!is_file($path)) {
+            return [];
+        }
+
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        if ($lines === []) {
+            return [];
+        }
+
+        $run_lines = [];
+        for ($i = count($lines) - 1; $i >= 0; $i--) {
+            array_unshift($run_lines, $lines[$i]);
+            if (str_contains($lines[$i], 'RunDaily request received')) {
+                break;
+            }
+        }
+
+        $subscribers_by_id = [];
+        foreach ($this->dailyEmailOptIns($tree) as $opt_in) {
+            $subscribers_by_id[(string) $opt_in['user_id']] = $opt_in;
+        }
+
+        $rows_by_user = [];
+        $run_time = '';
+        $summary = '';
+
+        foreach ($run_lines as $line) {
+            if ($run_time === '' && preg_match('/^\[([^\]]+)\]/', $line, $m) === 1) {
+                $run_time = $m[1];
+            }
+
+            if (str_contains($line, 'OK -') || str_contains($line, 'ERROR -')) {
+                $summary = preg_replace('/^\[[^\]]+\]\s*/', '', $line) ?? $line;
+            }
+
+            if (preg_match('/Subscriber checked:\s*(.+?), events found=(\d+)\./', $line, $m) === 1) {
+                $meta = $this->parseSubscriberLogMeta($m[1]);
+                $user_id = (string) ($meta['user_id'] ?? '');
+                $opt_in = $user_id !== '' ? ($subscribers_by_id[$user_id] ?? null) : null;
+                $name = (string) ($meta['name'] ?? '');
+                $email = (string) ($meta['email'] ?? '');
+                if (is_array($opt_in)) {
+                    $name = $name !== '' ? $name : (string) $opt_in['recipient']['name'];
+                    $email = $email !== '' ? $email : (string) $opt_in['recipient']['email'];
+                }
+                if ($name === '') {
+                    $name = $user_id !== '' ? 'User ' . $user_id : $this->t('Unknown recipient');
+                }
+
+                $key = $user_id !== '' ? $user_id : strtolower($email . '|' . $name);
+                $rows_by_user[$key] = [
+                    'name' => $name,
+                    'email' => $email !== '' ? $email : '-',
+                    'events' => (int) $m[2],
+                    'status' => (int) $m[2] > 0 ? 'sent' : 'skipped',
+                    'run_time' => $run_time,
+                    'summary' => '',
+                ];
+            }
+
+            if (preg_match('/Subscriber emailed:\s*(.+?), events sent=(\d+)\./', $line, $m) === 1) {
+                $meta = $this->parseSubscriberLogMeta($m[1]);
+                $key = (string) ($meta['user_id'] ?? strtolower(($meta['email'] ?? '') . '|' . ($meta['name'] ?? '')));
+                if (isset($rows_by_user[$key])) {
+                    $rows_by_user[$key]['status'] = 'sent';
+                    $rows_by_user[$key]['events'] = (int) $m[2];
+                }
+            }
+
+            if (preg_match('/Subscriber email failed:\s*(.+?), events found=(\d+)/', $line, $m) === 1) {
+                $meta = $this->parseSubscriberLogMeta($m[1]);
+                $key = (string) ($meta['user_id'] ?? strtolower(($meta['email'] ?? '') . '|' . ($meta['name'] ?? '')));
+                if (isset($rows_by_user[$key])) {
+                    $rows_by_user[$key]['status'] = 'failed';
+                    $rows_by_user[$key]['events'] = (int) $m[2];
+                }
+            }
+        }
+
+        foreach ($rows_by_user as &$row) {
+            $row['run_time'] = $run_time;
+            $row['summary'] = $summary;
+        }
+        unset($row);
+
+        return array_values($rows_by_user);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function parseSubscriberLogMeta(string $meta): array
+    {
+        $result = [];
+        foreach (explode(',', $meta) as $part) {
+            [$key, $value] = array_pad(explode('=', trim($part), 2), 2, '');
+            $key = trim($key);
+            $value = trim($value);
+            if ($key !== '') {
+                $result[$key] = $value;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param array{user_id:int,recipient:array{email:string,name:string}} $opted_in
+     */
+    private function subscriberLogLabel(array $opted_in): string
+    {
+        return 'user_id=' . (string) $opted_in['user_id']
+            . ', name=' . str_replace([',', "\n", "\r"], ' ', (string) $opted_in['recipient']['name'])
+            . ', email=' . str_replace([',', "\n", "\r"], ' ', (string) $opted_in['recipient']['email']);
     }
 
     private function schedulerDetailsHtml(Tree $tree, array $settings): string
@@ -887,38 +1088,38 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         $configured = $token !== '' && $opt_in_count > 0;
         $status_rows = '';
-        $status_rows .= '<tr><th scope="row">Daily email configured</th><td>' . ($configured ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-warning text-dark">Not yet</span>') . '</td></tr>';
-        $status_rows .= '<tr><th scope="row">Daily date timezone</th><td>' . $this->esc($this->localTimezoneName() . ' (' . $this->localDateTime() . ')') . '</td></tr>';
-        $status_rows .= '<tr><th scope="row">Registered user daily email opt-ins</th><td>' . $this->esc((string) $opt_in_count) . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Daily email configured') . '</th><td>' . ($configured ? '<span class="badge bg-success">' . $this->te('Yes') . '</span>' : '<span class="badge bg-warning text-dark">' . $this->te('Not yet') . '</span>') . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Daily date timezone') . '</th><td>' . $this->esc($this->localTimezoneName() . ' (' . $this->localDateTime() . ')') . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Registered user daily email opt-ins') . '</th><td>' . $this->esc((string) $opt_in_count) . '</td></tr>';
         $historical_path = $this->historicalFactsDataPath();
         $historical_available = is_dir($historical_path);
-        $status_rows .= '<tr><th scope="row">Historical context</th><td>' . ($historical_available ? '<span class="badge bg-success">Available</span>' : '<span class="badge bg-secondary">Not found</span>') . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Historical context') . '</th><td>' . ($historical_available ? '<span class="badge bg-success">' . $this->te('Available') . '</span>' : '<span class="badge bg-secondary">' . $this->te('Not found') . '</span>') . '</td></tr>';
         $last_attempt = (string) ($settings['last_scheduler_attempt'] ?? $settings['last_cron_attempt'] ?? '');
-        $status_rows .= '<tr><th scope="row">Last daily email check</th><td>' . $this->esc($last_attempt !== '' ? $last_attempt : 'The daily email has not checked yet') . '</td></tr>';
-        $status_rows .= '<tr><th scope="row">Last sent date</th><td>' . $this->esc($last_run !== '' ? $last_run : 'Not sent yet') . '</td></tr>';
-        $status_rows .= '<tr><th scope="row">Last result</th><td>' . $this->esc($last_result !== '' ? $last_result : '-') . '</td></tr>';
-        $status_rows .= '<tr><th scope="row">Events last sent</th><td>' . $this->esc($last_count) . '</td></tr>';
-        $status_rows .= '<tr><th scope="row">Recipients last sent</th><td>' . $this->esc($last_recipients !== '' ? $last_recipients : '-') . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Last daily email check') . '</th><td>' . $this->esc($last_attempt !== '' ? $last_attempt : $this->t('The daily email has not checked yet')) . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Last sent date') . '</th><td>' . $this->esc($last_run !== '' ? $last_run : $this->t('Not sent yet')) . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Last result') . '</th><td>' . $this->esc($last_result !== '' ? $last_result : '-') . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Events last sent') . '</th><td>' . $this->esc($last_count) . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Recipients last sent') . '</th><td>' . $this->esc($last_recipients !== '' ? $last_recipients : '-') . '</td></tr>';
         if ($last_error !== '') {
-            $status_rows .= '<tr><th scope="row">Last warning/error</th><td class="text-danger">' . $this->esc($last_error) . '</td></tr>';
+            $status_rows .= '<tr><th scope="row">' . $this->te('Last warning/error') . '</th><td class="text-danger">' . $this->esc($last_error) . '</td></tr>';
         }
 
         $html = '<div class="card mb-3">'
-            . '<div class="card-header"><strong>Daily email status</strong></div>'
+            . '<div class="card-header"><strong>' . $this->te('Daily email status') . '</strong></div>'
             . '<div class="card-body small">'
             . '<table class="table table-sm mb-3"><tbody>' . $status_rows . '</tbody></table>';
 
         if ($token === '') {
-            $html .= '<p class="alert alert-secondary mb-0">The secure scheduler link has not been prepared yet. Click <strong>Prepare secure scheduler link</strong> after confirming your own test email works.</p>';
+            $html .= '<p class="alert alert-secondary mb-0">' . $this->t('The secure scheduler link has not been prepared yet. Click %s after confirming your own test email works.', '<strong>' . $this->te('Prepare secure scheduler link') . '</strong>') . '</p>';
         } else {
             $url = $this->runDailyUrl($tree, $token);
             $scheduler_command = "/usr/bin/curl -L -sS --fail '" . $url . "' >/dev/null 2>&1";
-            $html .= '<p class="mb-1"><strong>Secure scheduler URL:</strong></p>'
+            $html .= '<p class="mb-1"><strong>' . $this->te('Secure scheduler URL:') . '</strong></p>'
                 . '<textarea class="form-control mb-2" rows="3" readonly>' . $this->esc($url) . '</textarea>'
-                . '<p class="mb-1"><strong>Scheduled task command:</strong></p>'
+                . '<p class="mb-1"><strong>' . $this->te('Scheduled task command:') . '</strong></p>'
                 . '<textarea class="form-control mb-2" rows="2" readonly>' . $this->esc($scheduler_command) . '</textarea>'
-                . '<p class="mb-2 text-muted">Test the URL in your browser first. After the first test, add <code>&amp;force=1</code> only if you need to test it again on the same day.</p>'
-                . '<p class="mb-0 text-muted">Daily email diagnostic log: <code>modules_v4/potts_on_this_day_email/data/scheduler.log</code></p>';
+                . '<p class="mb-2 text-muted">' . $this->t('Test the URL in your browser first. After the first test, add %s only if you need to test it again on the same day.', '<code>&amp;force=1</code>') . '</p>'
+                . '<p class="mb-0 text-muted">' . $this->t('Daily email diagnostic log: %s', '<code>modules_v4/potts_on_this_day_email/data/scheduler.log</code>') . '</p>';
         }
 
         return $html . '</div></div>';
@@ -927,18 +1128,18 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     private function emailText(Tree $tree, Collection $facts, ?array $relationship_settings = null, string $relationship_label = ''): string
     {
         $lines = [];
-        $lines[] = 'On this day in the family tree';
+        $lines[] = $this->t('On this day in the family tree');
         $lines[] = $this->localDateHeading();
         $lines[] = '';
 
         if ($facts->isEmpty()) {
-            $lines[] = 'No births, deaths or marriages were found for today.';
+            $lines[] = $this->t('No births, deaths or marriages were found for today.');
             $lines[] = '';
             $lines[] = $this->emailTurnOffText($tree);
             return implode(PHP_EOL, $lines);
         }
 
-        foreach (['INDI:BIRT' => 'Births', 'INDI:DEAT' => 'Deaths', 'FAM:MARR' => 'Marriages'] as $tag => $heading) {
+        foreach (['INDI:BIRT' => $this->t('Births'), 'INDI:DEAT' => $this->t('Deaths'), 'FAM:MARR' => $this->t('Marriages')] as $tag => $heading) {
             $group = $facts->filter(static fn (Fact $fact): bool => $fact->tag() === $tag);
             if ($group->isEmpty()) {
                 continue;
@@ -957,15 +1158,15 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                 if ($relationship_note !== '') {
                     $lines[] = $relationship_note;
                 }
-                $lines[] = 'View record: ' . $this->absoluteUrl($fact->record()->url());
+                $lines[] = $this->t('View record:') . ' ' . $this->absoluteUrl($fact->record()->url());
 
                 $context = $this->historicalContextForFact($fact, 2);
                 if ($context !== []) {
-                    $lines[] = 'Historical context:';
+                    $lines[] = $this->t('Historical context:');
                     foreach ($context as $row) {
                         $lines[] = '  - ' . $row['display_date'] . ' - ' . $row['event_text'];
                         if ($row['link'] !== '') {
-                            $lines[] = '    Source: ' . $row['link'];
+                            $lines[] = '    ' . $this->t('Source:') . ' ' . $row['link'];
                         }
                     }
                 }
@@ -981,14 +1182,14 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     private function emailHtml(Tree $tree, Collection $facts, ?array $relationship_settings = null, string $relationship_label = ''): string
     {
-        $html = '<h2>On this day in the family tree</h2>';
+        $html = '<h2>' . $this->te('On this day in the family tree') . '</h2>';
         $html .= '<p>' . $this->esc($this->localDateHeading()) . '</p>';
 
         if ($facts->isEmpty()) {
-            return $html . '<p>No births, deaths or marriages were found for today.</p>' . $this->emailTurnOffHtml($tree);
+            return $html . '<p>' . $this->te('No births, deaths or marriages were found for today.') . '</p>' . $this->emailTurnOffHtml($tree);
         }
 
-        foreach (['INDI:BIRT' => 'Births', 'INDI:DEAT' => 'Deaths', 'FAM:MARR' => 'Marriages'] as $tag => $heading) {
+        foreach (['INDI:BIRT' => $this->t('Births'), 'INDI:DEAT' => $this->t('Deaths'), 'FAM:MARR' => $this->t('Marriages')] as $tag => $heading) {
             $group = $facts->filter(static fn (Fact $fact): bool => $fact->tag() === $tag);
             if ($group->isEmpty()) {
                 continue;
@@ -1006,14 +1207,14 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                 if ($relationship_note !== '') {
                     $html .= '<br>' . $relationship_note;
                 }
-                $html .= '<br><a href="' . $this->esc($url) . '">View record</a>';
+                $html .= '<br><a href="' . $this->esc($url) . '">' . $this->te('View record') . '</a>';
 
                 $context = $this->historicalContextForFact($fact, 2);
                 if ($context !== []) {
-                    $html .= '<div style="margin-top:0.4em"><strong>Historical context</strong><ul>';
+                    $html .= '<div style="margin-top:0.4em"><strong>' . $this->te('Historical context') . '</strong><ul>';
                     foreach ($context as $row) {
                         $source = $row['link'] !== ''
-                            ? ' <a href="' . $this->esc($row['link']) . '">Source</a>'
+                            ? ' <a href="' . $this->esc($row['link']) . '">' . $this->te('Source') . '</a>'
                             : '';
                         $html .= '<li>' . $this->esc($row['display_date'] . ' - ' . $row['event_text']) . $source . '</li>';
                     }
@@ -1032,17 +1233,17 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     {
         $my_page_url = $this->myPageUrl($tree);
 
-        return 'To change or turn off these daily emails, log in to the family tree and open My Page: ' . $my_page_url . PHP_EOL
-            . 'In the My On This Day daily email block, untick Email me daily, then click Save.';
+        return $this->t('To change or turn off these daily emails, log in to the family tree and open My Page:') . ' ' . $my_page_url . PHP_EOL
+            . $this->t('In the My On This Day daily email block, untick Email me daily, then click Save.');
     }
 
     private function emailTurnOffHtml(Tree $tree): string
     {
         $my_page_url = $this->myPageUrl($tree);
 
-        return '<hr><p style="font-size:0.95em;color:#555"><strong>Want to turn this off?</strong> '
-            . 'Log in to the family tree and open <a href="' . $this->esc($my_page_url) . '">My Page</a>. '
-            . 'In the <strong>My On This Day daily email</strong> block, untick <strong>Email me daily</strong>, then click <strong>Save</strong>.'
+        return '<hr><p style="font-size:0.95em;color:#555"><strong>' . $this->te('Want to turn this off?') . '</strong> '
+            . $this->t('Log in to the family tree and open %s.', '<a href="' . $this->esc($my_page_url) . '">' . $this->te('My Page') . '</a>') . ' '
+            . $this->t('In the %s block, untick %s, then click %s.', '<strong>' . $this->te('My On This Day daily email') . '</strong>', '<strong>' . $this->te('Email me daily') . '</strong>', '<strong>' . $this->te('Save') . '</strong>')
             . '</p>';
     }
 
@@ -1057,7 +1258,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $name = $bold_name ? '**' . $parts['name'] . '**' : $parts['name'];
         $line = trim($parts['date'] . ' - ' . $name . ' ' . $parts['verb']);
         if ($parts['place'] !== '') {
-            $line .= ' in ' . $parts['place'];
+            $line .= ' ' . $this->t('in') . ' ' . $parts['place'];
         }
         $line .= '.';
 
@@ -1069,7 +1270,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $parts = $this->factLineParts($fact);
         $line = trim($this->esc($parts['date']) . ' - <strong>' . $this->esc($parts['name']) . '</strong> ' . $this->esc($parts['verb']));
         if ($parts['place'] !== '') {
-            $line .= ' in ' . $this->esc($parts['place']);
+            $line .= ' ' . $this->te('in') . ' ' . $this->esc($parts['place']);
         }
         $line .= '.';
 
@@ -1086,9 +1287,9 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $place = $this->plain($fact->place()->gedcomName());
 
         $verb = match ($fact->tag()) {
-            'INDI:BIRT' => 'was born',
-            'INDI:DEAT' => 'died',
-            'FAM:MARR'  => 'were married',
+            'INDI:BIRT' => $this->t('was born'),
+            'INDI:DEAT' => $this->t('died'),
+            'FAM:MARR'  => $this->t('were married'),
             default     => strtolower($this->plain($fact->label())),
         };
 
@@ -1187,23 +1388,46 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             return $this->relationship_path_cache[$cache_key];
         }
 
+        $details = $this->relationshipPathDetails($tree, $root_xref, $target, $max_steps);
+        $labels = $details === null ? null : $details['labels'];
+        $this->relationship_path_cache[$cache_key] = $labels;
+
+        return $labels;
+    }
+
+    /**
+     * Return a short relationship path from the root to the target, including the
+     * individual reached at each step. The individual list lets compound
+     * relationships keep the correct gender for the intermediate person, such as
+     * "niece's husband" rather than "nephew's husband".
+     *
+     * @return array{labels: array<int, string>, individuals: array<int, Individual>}|null
+     */
+    private function relationshipPathDetails(Tree $tree, string $root_xref, Individual $target, int $max_steps): ?array
+    {
+        $cache_key = $tree->id() . ':' . $root_xref . ':' . $target->xref() . ':' . $max_steps;
+        if (array_key_exists($cache_key, $this->relationship_path_detail_cache)) {
+            return $this->relationship_path_detail_cache[$cache_key];
+        }
+
         $root = Registry::individualFactory()->make($root_xref, $tree);
         if (!$root instanceof Individual) {
-            $this->relationship_path_cache[$cache_key] = null;
+            $this->relationship_path_detail_cache[$cache_key] = null;
             return null;
         }
 
         if ($root->xref() === $target->xref()) {
-            $this->relationship_path_cache[$cache_key] = [];
-            return [];
+            $details = ['labels' => [], 'individuals' => []];
+            $this->relationship_path_detail_cache[$cache_key] = $details;
+            return $details;
         }
 
         $visited_individuals = [$root->xref() => true];
-        $queue = [[$root, []]];
+        $queue = [[$root, [], []]];
         $head = 0;
 
         while (isset($queue[$head])) {
-            [$individual, $path] = $queue[$head];
+            [$individual, $path, $path_individuals] = $queue[$head];
             $head++;
 
             if (count($path) >= $max_steps) {
@@ -1217,18 +1441,20 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
                 $related = $item['individual'];
                 $next_path = array_merge($path, [$item['label']]);
+                $next_path_individuals = array_merge($path_individuals, [$related]);
 
                 if ($related->xref() === $target->xref()) {
-                    $this->relationship_path_cache[$cache_key] = $next_path;
-                    return $next_path;
+                    $details = ['labels' => $next_path, 'individuals' => $next_path_individuals];
+                    $this->relationship_path_detail_cache[$cache_key] = $details;
+                    return $details;
                 }
 
                 $visited_individuals[$xref] = true;
-                $queue[] = [$related, $next_path];
+                $queue[] = [$related, $next_path, $next_path_individuals];
             }
         }
 
-        $this->relationship_path_cache[$cache_key] = null;
+        $this->relationship_path_detail_cache[$cache_key] = null;
         return null;
     }
 
@@ -1374,17 +1600,19 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         $max_steps = $this->relationshipMaxSteps($settings);
         $root_name = $this->plain($root->fullName());
-        $to_you = $relationship_label === 'Relationship to you';
+        $to_you = $relationship_label === $this->t('Relationship to you');
         $items = [];
 
         foreach ($this->individualsForFact($fact) as $individual) {
-            $path = $this->relationshipPath($tree, $root_xref, $individual, $max_steps);
-            if ($path === null) {
+            $path_details = $this->relationshipPathDetails($tree, $root_xref, $individual, $max_steps);
+            if ($path_details === null) {
                 continue;
             }
 
+            $path = $path_details['labels'];
+            $path_individuals = $path_details['individuals'];
             $name = $this->plain($individual->fullName());
-            $description = $this->relationshipDescription($path, $individual);
+            $description = $this->relationshipDescription($path, $individual, $path_individuals);
             $items[] = [
                 'sentence' => $this->relationshipSentence($name, $description, $root_name, $to_you),
                 'url' => $this->relationshipChartUrl($tree, $root, $individual),
@@ -1529,7 +1757,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     /**
      * @param array<int, string> $path
      */
-    private function relationshipDescription(array $path, Individual $target): string
+    private function relationshipDescription(array $path, Individual $target, array $path_individuals = []): string
     {
         $length = count($path);
 
@@ -1579,7 +1807,10 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         if (end($path) === 'spouse' && count($path) > 1) {
             $base_path = $path;
             array_pop($base_path);
-            $base = $this->relationshipDescription($base_path, $target);
+
+            $base_path_individuals = array_slice($path_individuals, 0, count($base_path));
+            $base_target = $base_path_individuals[count($base_path_individuals) - 1] ?? $target;
+            $base = $this->relationshipDescription($base_path, $base_target, $base_path_individuals);
             if ($base !== 'self') {
                 return $this->possessiveRelationship($base) . ' ' . $this->genderedRelationshipName($target, 'husband', 'wife', 'spouse');
             }
@@ -1588,7 +1819,8 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         if ($path[0] === 'spouse' && count($path) > 1) {
             $base_path = $path;
             array_shift($base_path);
-            $base = $this->relationshipDescription($base_path, $target);
+            $base_path_individuals = array_slice($path_individuals, 1);
+            $base = $this->relationshipDescription($base_path, $target, $base_path_individuals);
             if ($base !== 'self') {
                 return "spouse's " . $base;
             }
@@ -2903,7 +3135,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $this->ensureHtaccess();
 
         $line = '[' . $this->localDateTime() . '] ' . $message . PHP_EOL;
-        @file_put_contents($dir . '/scheduler.log', $line, FILE_APPEND | LOCK_EX);
+        @file_put_contents($this->schedulerLogPath(), $line, FILE_APPEND | LOCK_EX);
     }
 
     /**
@@ -2949,6 +3181,11 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     private function userSettingsPath(): string
     {
         return __DIR__ . '/data/user_settings.json';
+    }
+
+    private function schedulerLogPath(): string
+    {
+        return __DIR__ . '/data/scheduler.log';
     }
 
     private function sendUrl(int $block_id, string $mode = 'me'): string

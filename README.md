@@ -15,6 +15,7 @@ webtrees users who opt in from My Page.
 - Links relationship descriptions to the webtrees relationship chart.
 - Shows administrators subscriber and delivery status.
 - Supports an optional integration with Potts Historical Facts.
+- Adds starter translations for Dutch, German, French, Spanish, Polish and Portuguese.
 - Uses webtrees' native `EmailService`.
 
 ## Requirements
@@ -168,8 +169,8 @@ site settings, subscriber preferences and delivery status.
 - Exact daily delivery requires a scheduler.
 - Delivery reputation, SPF, DKIM and DMARC are controlled by the site's email
   provider and DNS configuration, not by this module.
-- Interface text is currently supplied in English.
-- Version 1.0.0-beta.6 is intended for testing with webtrees 2.2.6.
+- Starter translations are included for Dutch, German, French, Spanish, Polish and Portuguese, but native-speaker corrections are welcome.
+- Version 1.0.0 is the first stable release for webtrees 2.2.6 and later 2.2.x releases.
 
 ## Licence
 
