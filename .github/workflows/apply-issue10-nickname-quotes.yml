@@ -1,0 +1,54 @@
+name: Apply tested issue 10 nickname fix
+
+on:
+  push:
+    branches:
+      - fix/issue-10-nickname-quotes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-10-nickname-quotes
+      - name: Apply and validate tested fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          path = Path('module.php')
+          text = path.read_text(encoding='utf-8')
+          old = '''    private function plain(string $html): string
+              {
+                  return trim(html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+              }'''
+          new = '''    private function plain(string $html): string
+              {
+                  // HTML <q> elements rely on the browser to draw quotation marks.
+                  // Preserve that meaning before stripping markup so webtrees nicknames
+                  // such as <q class="wt-nickname">Jack</q> remain visibly quoted in
+                  // plain-text email content and other text-only module output.
+                  $html = preg_replace('/<q\\b[^>]*>/i', '“', $html) ?? $html;
+                  $html = preg_replace('/<\\/q>/i', '”', $html) ?? $html;
+
+                  return trim(html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+              }'''
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected exactly one plain() block, found {text.count(old)}')
+          path.write_text(text.replace(old, new), encoding='utf-8')
+          PY
+          php -l module.php
+          grep -Fq "preg_replace('/<q\\b[^>]*>/i', '“', \$html)" module.php
+          grep -Fq "preg_replace('/<\\/q>/i', '”', \$html)" module.php
+          rm -f .github/workflows/apply-issue10-nickname-quotes.yml
+          git config user.name "PottsNet"
+          git config user.email "42736500+PottsNet@users.noreply.github.com"
+          git add -A
+          git commit -m "Preserve nickname quotation marks in plain text"
+          git push origin HEAD:fix/issue-10-nickname-quotes
