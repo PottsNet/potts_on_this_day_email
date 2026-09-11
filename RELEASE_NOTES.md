@@ -1,3 +1,25 @@
+# Potts On This Day Email 1.2.0
+
+Version 1.2.0 redesigns daily scheduling so the module behaves correctly on webtrees installations anywhere in the world, regardless of where the hosting server or cron service is located.
+
+The module now uses the timezone configured in **Control panel > Website > Website preferences** as its single source of truth. Administrators choose a local daily send time, while the secure scheduler URL is normally called every 15 minutes. Routine checks exit immediately until the local send time is due and the current local date has not already been processed. This also means daylight-saving changes are handled automatically without changing the cron schedule.
+
+The same local date is now used consistently for the email subject, body heading, genealogy event lookup, ages, anniversaries and scheduler processed-date key. The release also includes an upgrade safeguard that converts the previous 1.1.x `last_run` date when the old module timezone and webtrees timezone were on different calendar days, reducing the chance of an immediate duplicate email after upgrade.
+
+Routine scheduler checks are intentionally lightweight and are not written to the diagnostic log. A complete SMTP failure is treated as processed for that day to prevent repeated 15-minute retries; after fixing email delivery an administrator can deliberately retry with `force=1`.
+
+# Potts On This Day Email 1.1.1
+
+This maintenance release restores the administrator daily delivery report on the module settings page. Version 1.1.0 added birthday and email-type information to scheduler log lines, but the report parser still expected the older format and therefore displayed no recipients.
+
+The report now recognises both formats and selects the newest scheduler run that actually checked subscribers. This also prevents a later `Already sent today` scheduler request from hiding the most recent delivery details.
+
+# Potts On This Day Email 1.1.0
+
+This release adds a personalised birthday edition for registered subscribers. On the birthday recorded for a subscriber's selected individual, the normal On This Day email changes to a special birthday message using their first name and, when available, their age. Any other family events for the day are included below the greeting.
+
+The birthday email uses the existing opt-in, account email address, privacy permissions, scheduler and sender settings. No new configuration is required.
+
 # Potts On This Day Email v1.0.1
 
 Maintenance release for early public GitHub issue feedback.

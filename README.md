@@ -6,12 +6,13 @@ webtrees users who opt in from My Page.
 ## Features
 
 - Includes births, deaths and marriages occurring on the current day.
+- Sends each subscriber a special personalised birthday edition on their own birthday.
 - Lets each registered user opt in or out.
 - Uses each subscriber's linked or selected individual as the relationship root.
 - Filters events by a configurable relationship distance.
 - Can optionally limit results to people who are still living.
 - Builds each email using the subscriber's webtrees privacy permissions.
-- Sends only when matching events exist.
+- Sends only when matching events exist, with the subscriber's own birthday treated as a special event.
 - Adds age, death and wedding-anniversary details.
 - Links relationship descriptions to the webtrees relationship chart.
 - Shows administrators subscriber and delivery status.
@@ -23,7 +24,7 @@ webtrees users who opt in from My Page.
 
 - webtrees 2.2.6 or a compatible webtrees 2.2.x release
 - PHP 8.3 or later
-- A scheduler capable of requesting a secure HTTPS URL once per day
+- A scheduler capable of requesting a secure HTTPS URL every 15 minutes (hourly is also supported)
 - Correctly configured webtrees email delivery
 
 ## Installation
@@ -36,10 +37,11 @@ Use the release ZIP attached to the GitHub release, not GitHub's automatic "Sour
 4. Enable **Potts On This Day Email**.
 5. Add the block to My Page.
 6. Select the module's settings icon under **Control panel > Modules > All modules**.
-7. Choose the family tree and save the sender name, sender email and daily timezone.
-8. Configure authenticated SMTP under **Control panel > Website > Sending email**.
-9. Add the block to My Page and send yourself a test email.
-10. Return to the module settings page, prepare the secure scheduler link and configure it to run daily.
+7. Confirm the webtrees website timezone under **Control panel > Website > Website preferences**.
+8. Choose the family tree and save the sender name, sender email and daily send time.
+9. Configure authenticated SMTP under **Control panel > Website > Sending email**.
+10. Add the block to My Page and send yourself a test email.
+11. Return to the module settings page, prepare the secure scheduler link and configure it to run every 15 minutes.
 
 The final module path should be:
 
@@ -73,7 +75,8 @@ The administrator page provides:
 
 - family-tree selection
 - sender name and sender email
-- daily timezone
+- webtrees website timezone display
+- daily send time
 - authenticated SMTP guidance
 - scheduler URL and cron command
 - scheduler-token regeneration
@@ -87,52 +90,64 @@ signed-in user's personal subscription and relationship settings.
 
 webtrees 2.2.x does not provide a general exact-time scheduler for custom modules.
 The module therefore provides a token-protected HTTPS endpoint that can be called
-by cPanel cron, another hosting scheduler or an external uptime/scheduling service.
+by cPanel cron, another hosting scheduler or an external scheduling service.
 
-The administrator settings page displays both the secure URL and a `curl` command. Keep the URL
-private because it contains the scheduler token.
+The scheduler should normally request the endpoint every 15 minutes. These
+routine checks are deliberately lightweight. Before any subscriber or genealogy
+processing occurs, the module:
 
-The settings page cannot normally create the scheduled task itself. A PHP module
-does not usually have permission to modify the hosting account's cron table,
-Plesk scheduler, Windows Task Scheduler or an external service. It prepares
-everything the scheduler needs and provides instructions for:
+1. reads the webtrees website timezone
+2. converts the current instant to that timezone
+3. checks whether the configured daily send time has arrived
+4. checks whether that local calendar date has already been processed
 
-- cPanel Cron Jobs
-- Plesk Scheduled Tasks using **Fetch a URL**
-- DirectAdmin Cron Jobs
-- Linux `crontab` over SSH
-- Windows Task Scheduler
-- NAS task schedulers
-- external URL scheduling services
-- requesting assistance from the hosting provider
+If the email is not due, the request exits immediately. This makes the scheduler
+independent of the physical server location, hosting-panel timezone and daylight-
+saving changes.
 
-For a Linux server with SSH access, a typical entry for 6:00 am is:
+The administrator settings page displays the secure URL, the `curl` command and
+a recommended Linux cron entry. Keep the URL private because it contains the
+scheduler token.
+
+A typical Linux entry is:
 
 ```cron
-0 6 * * * /usr/bin/curl -L -sS --fail 'SECURE_SCHEDULER_URL' >/dev/null 2>&1
+*/15 * * * * /usr/bin/curl -L -sS --fail 'SECURE_SCHEDULER_URL' >/dev/null 2>&1
 ```
 
-For Plesk, choose **Fetch a URL** and paste the secure scheduler URL directly.
-For other control panels, use their Cron Jobs or Scheduled Tasks feature and
-paste the generated command.
+For cPanel, set **Minute** to `*/15` and the remaining schedule fields to `*`.
+For Plesk, use **Fetch a URL** and run it every 15 minutes. Other hosting panels,
+Windows Task Scheduler, NAS schedulers and external URL schedulers can use the
+same interval.
 
-If the hosting account has no scheduler, use a reputable external URL scheduling
-service to request the secure HTTPS URL once each day. Keep the complete URL
-private because it contains the token.
+If a hosting provider does not allow 15-minute jobs, an hourly request is also
+safe. The only difference is that delivery can be up to 59 minutes later than
+the configured local send time.
 
-### Scheduler Timezone
+### Timezone and daylight saving
 
-The timezone saved in this module determines which calendar date is treated as
-today. It does not change the timezone used by cron or an external scheduler.
-Check the server, hosting panel or external service timezone when choosing the
-delivery time.
+The module no longer stores its own date timezone. Version 1.2.0 uses the
+**webtrees website timezone** configured under:
+
+**Control panel > Website > Website preferences**
+
+That timezone is used consistently for the email subject, heading, event lookup,
+ages, anniversaries and daily processed-date key. PHP timezone identifiers such
+as `Australia/Melbourne`, `Europe/London` and `America/New_York` automatically
+apply daylight-saving rules from the timezone database.
+
+The hosting server and cron service can be in another country or use UTC. Their
+timezone does not determine the family-tree date or delivery time.
 
 The endpoint:
 
-- runs at most once per local calendar day unless `force=1` is added
+- processes at most once per webtrees-site local calendar day unless `force=1` is added
 - prevents overlapping runs with a file lock
+- performs the due-time check before subscriber or genealogy processing
 - skips subscribers who have no matching events
-- records a diagnostic log in `data/scheduler.log`
+- records only meaningful delivery runs in `data/scheduler.log`
+- treats a complete SMTP failure as processed for that day to avoid retrying every 15 minutes; after fixing email delivery, an administrator can deliberately retry with `force=1`
+- migrates the previous 1.1.x `last_run` date when necessary so a timezone-boundary upgrade does not immediately duplicate the current day's email
 
 ## User Settings
 
@@ -143,6 +158,8 @@ Each signed-in user can choose:
 - whether relationship filtering is enabled
 - the maximum relationship distance
 - whether to include only events for people who are still living
+
+When the selected root individual's birthday falls on the current day, the normal daily email becomes a birthday edition. It uses the individual's first name, includes their age when the birth year is known and continues with any other family events for that day.
 
 The module reads the user's current account email address at delivery time.
 
@@ -172,7 +189,7 @@ site settings, subscriber preferences and delivery status.
 - Delivery reputation, SPF, DKIM and DMARC are controlled by the site's email
   provider and DNS configuration, not by this module.
 - Starter translations are included for Dutch, German, French, Spanish, Polish and Portuguese, but native-speaker corrections are welcome.
-- Version 1.0.1 is a maintenance release for webtrees 2.2.6 and later 2.2.x releases.
+- Version 1.2.0 makes daily scheduling timezone-safe by using the webtrees website timezone and a lightweight recurring scheduler check.
 
 ## Licence
 
