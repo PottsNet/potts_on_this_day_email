@@ -17,6 +17,7 @@ use Fisharebest\Webtrees\Module\ModuleConfigTrait;
 use Fisharebest\Webtrees\Module\ModuleCustomInterface;
 use Fisharebest\Webtrees\Registry;
 use Fisharebest\Webtrees\Session;
+use Fisharebest\Webtrees\Site;
 use Fisharebest\Webtrees\Services\CalendarService;
 use Fisharebest\Webtrees\Services\EmailService;
 use Fisharebest\Webtrees\Services\TreeService;
@@ -36,6 +37,18 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     private const LIMIT_LOW = 10;
     private const LIMIT_HIGH = 20;
     private const DEFAULT_TIMEZONE = 'UTC';
+    private const DEFAULT_SEND_TIME = '06:00';
+
+    // Personal settings belong to a webtrees user within a tree. Store them in
+    // webtrees' user/tree preference table rather than in the module folder so
+    // they survive refreshes, module upgrades and filesystem permission changes.
+    private const USER_PREF_VERSION = 'potts-otd-v';
+    private const USER_PREF_DAILY = 'potts-otd-daily';
+    private const USER_PREF_REL_FILTER = 'potts-otd-rel';
+    private const USER_PREF_LIVING = 'potts-otd-living';
+    private const USER_PREF_ROOT = 'potts-otd-root';
+    private const USER_PREF_STEPS = 'potts-otd-steps';
+    private const USER_PREF_UPDATED = 'potts-otd-updated';
 
     /** @var array<string, array<int, array<int, array<string, string>>>> */
     private array $historical_context_cache = [];
@@ -48,6 +61,8 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     /** @var array<string, array{labels: array<int, string>, individuals: array<int, Individual>}|null> */
     private array $relationship_path_detail_cache = [];
+
+    private ?\DateTimeImmutable $scheduler_now = null;
 
     public function title(): string
     {
@@ -66,7 +81,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     public function customModuleVersion(): string
     {
-        return '1.0.1';
+        return '1.2.0';
     }
 
     public function customModuleLatestVersion(): string
@@ -134,6 +149,8 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             'tree_urls'      => $tree_urls,
             'selected_tree'  => $selected_tree,
             'settings'       => $settings,
+            'site_timezone'  => $this->localTimezoneName(),
+            'site_local_time'=> $this->localDateTime(),
             'saved'          => Validator::queryParams($request)->boolean('saved', false),
             'prepared'       => Validator::queryParams($request)->boolean('prepared', false),
             'token_reset'    => Validator::queryParams($request)->boolean('token_reset', false),
@@ -175,9 +192,9 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             return $this->adminRedirect($tree->name(), [$task === 'reset_token' ? 'token_reset' : 'prepared' => '1'], $return_url);
         }
 
-        $timezone = isset($data['timezone']) && is_string($data['timezone'])
-            ? trim($data['timezone'])
-            : self::DEFAULT_TIMEZONE;
+        $send_time = isset($data['send_time']) && is_string($data['send_time'])
+            ? trim($data['send_time'])
+            : self::DEFAULT_SEND_TIME;
         $sender_email = isset($data['sender_email']) && is_string($data['sender_email'])
             ? trim($data['sender_email'])
             : '';
@@ -185,15 +202,16 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             ? $this->plain($data['sender_name'])
             : '';
 
-        if (!in_array($timezone, timezone_identifiers_list(), true)) {
-            return $this->adminRedirect($tree->name(), ['error' => $this->t('Enter a valid PHP timezone, such as Australia/Melbourne or Europe/London.')], $return_url);
+        if (!$this->isValidSendTime($send_time)) {
+            return $this->adminRedirect($tree->name(), ['error' => $this->t('Enter a valid daily send time.')], $return_url);
         }
 
         if (filter_var($sender_email, FILTER_VALIDATE_EMAIL) === false) {
             return $this->adminRedirect($tree->name(), ['error' => $this->t('Enter a valid sender email address.')], $return_url);
         }
 
-        $settings['timezone'] = $timezone;
+        unset($settings['timezone']);
+        $settings['send_time'] = $send_time;
         $settings['sender_email'] = $sender_email;
         $settings['sender_name'] = $sender_name !== '' ? $sender_name : $sender_email;
 
@@ -283,8 +301,6 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
      */
     public function getRunDailyAction(ServerRequestInterface $request): ResponseInterface
     {
-        $this->schedulerLog('RunDaily request received.');
-
         $tree = $request->getAttribute('tree');
         if (!$tree instanceof Tree) {
             $this->schedulerLog('ERROR - No tree was supplied in the URL.');
@@ -295,44 +311,62 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $token = (string) ($query['token'] ?? '');
         $force = (string) ($query['force'] ?? '') === '1';
         $settings = $this->settings();
-        $settings['last_scheduler_attempt'] = $this->localDateTime();
-        $this->saveSettings($settings);
 
         if (($settings['token'] ?? '') === '' || !hash_equals((string) $settings['token'], $token)) {
-            $settings['last_result'] = 'invalid token';
-            $settings['last_error'] = 'Invalid or missing token on daily email request';
-            $this->saveSettings($settings);
             $this->schedulerLog('ERROR - Invalid or missing token.');
             return $this->textResponse('ERROR - Invalid or missing token.', 403);
         }
 
-        $opted_in_users = $this->dailyEmailOptIns($tree);
-        if ($opted_in_users === []) {
-            $settings['last_result'] = 'no subscribers';
-            $settings['last_error'] = '';
-            $this->saveSettings($settings);
-            $this->schedulerLog('OK - No registered users have opted in.');
-            return $this->textResponse('OK - No registered users have opted in to daily email.');
-        }
+        $now = $this->localNow();
+        $today_key = $now->format('Y-m-d');
+        $settings['last_scheduler_attempt'] = $now->format('Y-m-d H:i:s T');
+        $this->saveSettings($settings);
 
-        $today_key = $this->localDateKey();
-        if (!$force && (string) ($settings['last_run'] ?? '') === $today_key) {
-            $settings['last_result'] = 'already sent today';
-            $settings['last_error'] = '';
-            $this->saveSettings($settings);
-            $this->schedulerLog('OK - Already sent today.');
-            return $this->textResponse('OK - Already sent today. Add &force=1 to the URL to send it again for testing.');
+        if (!$force) {
+            if ((string) ($settings['last_run'] ?? '') === $today_key) {
+                return $this->textResponse('OK - Today has already been processed. Add &force=1 to the URL only if you deliberately need to test it again.');
+            }
+
+            $send_time = $this->sendTimeFromSettings($settings);
+            if ($now->format('H:i') < $send_time) {
+                return $this->textResponse('OK - Daily email is not due yet. Scheduled local time: ' . $send_time . ' ' . $this->localTimezoneName() . '.');
+            }
         }
 
         $lock = $this->acquireRunLock();
         if ($lock === null) {
-            $this->schedulerLog('OK - Another daily run is already in progress.');
             return $this->textResponse('OK - Another daily run is already in progress.', 409);
         }
 
         try {
+            // Re-read the settings after acquiring the lock in case another
+            // request completed between the initial due check and this point.
+            $settings = $this->settings();
+            if (!$force && (string) ($settings['last_run'] ?? '') === $today_key) {
+                return $this->textResponse('OK - Today has already been processed.');
+            }
+
+            // Freeze the effective local instant for the whole daily run so
+            // the subject, heading, event lookup, ages and result date all use
+            // exactly the same webtrees-site calendar day.
+            $this->scheduler_now = $now;
+            $this->schedulerLog('RunDaily due request received for local date ' . $today_key . '.');
+
+            $opted_in_users = $this->dailyEmailOptIns($tree);
+            if ($opted_in_users === []) {
+                $settings['last_run'] = $today_key;
+                $settings['last_result'] = 'no subscribers';
+                $settings['last_count'] = '0';
+                $settings['last_recipients'] = '0';
+                $settings['last_error'] = '';
+                $this->saveSettings($settings);
+                $this->schedulerLog('OK - No registered users have opted in.');
+                return $this->textResponse('OK - No registered users have opted in to daily email.');
+            }
+
             return $this->runDailyForSubscribers($tree, $settings, $opted_in_users);
         } finally {
+            $this->scheduler_now = null;
             $this->releaseRunLock($lock);
         }
     }
@@ -343,38 +377,46 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     private function runDailyForSubscribers(Tree $tree, array $settings, array $opted_in_users): ResponseInterface
     {
         $today_key = $this->localDateKey();
-        $subject = $this->t('On this day in the family tree') . ' - ' . $this->localDateHeading();
         $sender = $this->senderFromSettings($settings, $opted_in_users[0]['recipient'] ?? ['email' => '', 'name' => '']);
         $sent = 0;
         $failed = [];
         $event_count_total = 0;
         $skipped_no_events = 0;
+        $birthday_emails = 0;
 
         foreach ($opted_in_users as $opted_in) {
             $user_settings = $opted_in['settings'];
             $subscriber_user = $opted_in['user'];
 
-            $result_for_user = $this->runAsUser($subscriber_user, function () use ($tree, $user_settings, $sender, $subject, $opted_in): array {
+            $result_for_user = $this->runAsUser($subscriber_user, function () use ($tree, $user_settings, $sender, $opted_in): array {
                 $user_facts = $this->todayFacts($tree, $user_settings);
                 $event_count = $user_facts->count();
+                $birthday = $this->subscriberBirthdayDetails($tree, $user_facts, $user_settings);
+                $email_facts = $this->factsWithoutSubscriberBirthday($user_facts, $birthday);
 
                 $subscriber_label = $this->subscriberLogLabel($opted_in);
-                $this->schedulerLog('Subscriber checked: ' . $subscriber_label . ', events found=' . $event_count . '.');
+                $birthday_note = $birthday !== null ? ', birthday=yes' : ', birthday=no';
+                $this->schedulerLog('Subscriber checked: ' . $subscriber_label . ', events found=' . $event_count . $birthday_note . '.');
 
-                if ($user_facts->isEmpty()) {
-                    return ['sent' => 0, 'failed' => [], 'event_count' => 0, 'skipped_no_events' => 1];
+                if ($user_facts->isEmpty() && $birthday === null) {
+                    return ['sent' => 0, 'failed' => [], 'event_count' => 0, 'skipped_no_events' => 1, 'birthday_sent' => 0];
                 }
+
+                $subject = $birthday !== null
+                    ? $this->birthdaySubject($birthday)
+                    : $this->t('On this day in the family tree') . ' - ' . $this->localDateHeading();
 
                 $user_result = $this->sendToRecipients(
                     $sender,
                     [$opted_in['recipient']],
                     $subject,
-                    $this->emailText($tree, $user_facts, $user_settings, $this->t('Relationship to you')),
-                    $this->emailHtml($tree, $user_facts, $user_settings, $this->t('Relationship to you'))
+                    $this->emailText($tree, $email_facts, $user_settings, $this->t('Relationship to you'), $birthday),
+                    $this->emailHtml($tree, $email_facts, $user_settings, $this->t('Relationship to you'), $birthday)
                 );
 
                 if ((int) $user_result['sent'] > 0) {
-                    $this->schedulerLog('Subscriber emailed: ' . $subscriber_label . ', events sent=' . $event_count . '.');
+                    $kind = $birthday !== null ? 'birthday email' : 'daily email';
+                    $this->schedulerLog('Subscriber emailed: ' . $subscriber_label . ', type=' . $kind . ', events sent=' . $event_count . '.');
                 } else {
                     $this->schedulerLog('Subscriber email failed: ' . $subscriber_label . ', events found=' . $event_count . ', failed=' . implode(',', $user_result['failed']) . '.');
                 }
@@ -384,11 +426,13 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                     'failed' => $user_result['failed'],
                     'event_count' => $event_count,
                     'skipped_no_events' => 0,
+                    'birthday_sent' => $birthday !== null && (int) $user_result['sent'] > 0 ? 1 : 0,
                 ];
             });
 
             $event_count_total += (int) $result_for_user['event_count'];
             $skipped_no_events += (int) $result_for_user['skipped_no_events'];
+            $birthday_emails += (int) $result_for_user['birthday_sent'];
             $sent += (int) $result_for_user['sent'];
             $failed = array_merge($failed, $result_for_user['failed']);
         }
@@ -406,6 +450,11 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         }
 
         if ($sent === 0) {
+            // With a frequent scheduler, treat a failed daily attempt as
+            // processed for this local date. This avoids hammering SMTP every
+            // 15 minutes. After fixing email delivery, an administrator can
+            // deliberately retry with &force=1.
+            $settings['last_run'] = $today_key;
             $settings['last_result'] = 'failed';
             $settings['last_count'] = (string) $event_count_total;
             $settings['last_recipients'] = '0';
@@ -422,7 +471,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $settings['last_error'] = implode('; ', $failed);
         $this->saveSettings($settings);
 
-        $message = 'OK - Email sent to ' . $sent . ' recipient(s) - ' . $event_count_total . ' event item(s) found across all personalised emails. Subscribers checked: ' . count($opted_in_users) . '. Skipped no-event subscribers: ' . $skipped_no_events . '.';
+        $message = 'OK - Email sent to ' . $sent . ' recipient(s) - ' . $event_count_total . ' event item(s) found across all personalised emails. Birthday editions sent: ' . $birthday_emails . '. Subscribers checked: ' . count($opted_in_users) . '. Skipped no-event subscribers: ' . $skipped_no_events . '.';
         if ($failed !== []) {
             $message .= ' Failed: ' . implode('; ', $failed);
         }
@@ -449,18 +498,12 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
     private function todayFacts(Tree $tree, ?array $relationship_settings = null): Collection
     {
         $calendar_service = new CalendarService();
-
-        // webtrees/PHP may use a different server timezone. Calculate the
-        // genealogy day using the timezone selected by the site manager.
-        $old_timezone = date_default_timezone_get();
-        date_default_timezone_set($this->localTimezoneName());
-
-        try {
-            $today = Registry::timestampFactory()->now();
-            $julian_day = $today->julianDay();
-        } finally {
-            date_default_timezone_set($old_timezone);
-        }
+        $today = $this->localNow();
+        $julian_day = GregorianToJD(
+            (int) $today->format('n'),
+            (int) $today->format('j'),
+            (int) $today->format('Y')
+        );
 
         $facts = $calendar_service->getEventsList(
             $julian_day,
@@ -555,7 +598,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         ];
 
         if (!$this->saveUserRelationshipSettings($tree, $user, $settings)) {
-            return '<p class="alert alert-danger mb-3">' . $this->t('Could not save your relationship filter settings. Check that %s is writable.', '<code>modules_v4/potts_on_this_day_email/data/</code>') . '</p>';
+            return $this->alertHtml('danger', 'Could not save your personal On This Day settings.');
         }
 
         return $this->alertHtml('success', 'Your personal On This Day settings have been updated.');
@@ -604,7 +647,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         return '<div class="card mb-3">'
             . '<div class="card-header"><strong>' . $this->te('My On This Day daily email') . '</strong> ' . $email_badge . '</div>'
             . '<div class="card-body small">'
-            . '<div class="alert alert-info mb-3">' . $this->te('Choose whether you want a daily On This Day email. It is only sent on days with matching births, deaths or marriages, using the relationship and living-person filters below.') . '</div>'
+            . '<div class="alert alert-info mb-3">' . $this->te('Choose whether you want a daily On This Day email. It is only sent on days with matching births, deaths or marriages, using the relationship and living-person filters below. On your birthday, it becomes a special personalised birthday edition.') . '</div>'
             . '<p class="mb-2"><strong>' . $this->te('Current root:') . '</strong> ' . $this->esc($root_label) . '</p>'
             . '<p class="text-muted mb-2">' . $linked_text . '</p>'
             . $use_linked_button
@@ -756,15 +799,20 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             ]];
         }
 
-        if ($facts->isEmpty()) {
+        $relationship_settings ??= $this->settings();
+        $birthday = $mode === 'me' ? $this->subscriberBirthdayDetails($tree, $facts, $relationship_settings) : null;
+        $email_facts = $this->factsWithoutSubscriberBirthday($facts, $birthday);
+
+        if ($facts->isEmpty() && $birthday === null) {
             return $this->alertHtml('info', 'No births, deaths or marriages were found for today, so no test email was sent.');
         }
 
-        $subject = $this->t('On this day in the family tree') . ' - ' . $this->localDateHeading();
-        $relationship_settings ??= $this->settings();
+        $subject = $birthday !== null
+            ? $this->birthdaySubject($birthday)
+            : $this->t('On this day in the family tree') . ' - ' . $this->localDateHeading();
         $relationship_label = $mode === 'me' ? $this->t('Relationship to you') : $this->relationshipLabelForSettings($tree, $relationship_settings);
-        $text = $this->emailText($tree, $facts, $relationship_settings, $relationship_label);
-        $html = $this->emailHtml($tree, $facts, $relationship_settings, $relationship_label);
+        $text = $this->emailText($tree, $email_facts, $relationship_settings, $relationship_label, $birthday);
+        $html = $this->emailHtml($tree, $email_facts, $relationship_settings, $relationship_label, $birthday);
         $sender = $this->senderFromSettings($this->settings(), $recipients[0]);
         $result = $this->sendToRecipients($sender, $recipients, $subject, $text, $html);
 
@@ -783,33 +831,35 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     private function subscriberDetailsHtml(Tree $tree): string
     {
-        $all = $this->readUserSettings();
-        $tree_key = $tree->name();
-        $tree_settings = $all[$tree_key] ?? [];
+        try {
+            $user_service = Registry::container()->get(UserService::class);
+        } catch (Throwable) {
+            $user_service = app(UserService::class);
+        }
 
-        if (!is_array($tree_settings) || $tree_settings === []) {
-            return '<div class="card mb-3">'
-                . '<div class="card-header"><strong>' . $this->te('Registered user daily email subscribers') . '</strong></div>'
-                . '<div class="card-body small">'
-                . '<p class="text-muted mb-0">' . $this->te('No registered users have saved personal On This Day settings yet.') . '</p>'
-                . '</div>'
-                . '</div>';
+        if (!$user_service instanceof UserService) {
+            return '';
         }
 
         $rows = '';
         $count = 0;
-        foreach ($tree_settings as $user_id => $settings) {
-            if (!is_array($settings)) {
+        foreach ($user_service->all() as $subscriber_user) {
+            if (!$subscriber_user instanceof UserInterface || $subscriber_user->id() <= 0) {
                 continue;
             }
 
+            $settings = $this->userRelationshipSettings($tree, $subscriber_user);
             if ((string) ($settings['daily_email_enabled'] ?? '0') !== '1') {
                 continue;
             }
 
             $count++;
-            $name = trim((string) ($settings['name'] ?? ''));
-            $email = trim((string) ($settings['email'] ?? ''));
+            $user_id = $subscriber_user->id();
+            $name = trim($this->plain($subscriber_user->realName()));
+            if ($name === '') {
+                $name = trim($this->plain($subscriber_user->userName()));
+            }
+            $email = trim($this->plain($subscriber_user->email()));
             $root_xref = strtoupper(trim((string) ($settings['relationship_root_xref'] ?? '')));
             $max_steps = (string) ($settings['relationship_max_steps'] ?? '4');
             $updated = trim((string) ($settings['updated'] ?? ''));
@@ -984,12 +1034,41 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
             return [];
         }
 
-        $run_lines = [];
-        for ($i = count($lines) - 1; $i >= 0; $i--) {
-            array_unshift($run_lines, $lines[$i]);
-            if (str_contains($lines[$i], 'RunDaily request received')) {
-                break;
+        // Use the newest scheduler run that actually checked subscribers.
+        // Version 1.2.0 no longer logs routine not-due/already-processed checks,
+        // while older logs may still contain the original request marker.
+        $run_blocks = [];
+        $current_block = [];
+        foreach ($lines as $line) {
+            if (str_contains($line, 'RunDaily ') && str_contains($line, 'request received')) {
+                if ($current_block !== []) {
+                    $run_blocks[] = $current_block;
+                }
+                $current_block = [$line];
+                continue;
             }
+
+            if ($current_block !== []) {
+                $current_block[] = $line;
+            }
+        }
+        if ($current_block !== []) {
+            $run_blocks[] = $current_block;
+        }
+
+        $run_lines = [];
+        for ($i = count($run_blocks) - 1; $i >= 0; $i--) {
+            $candidate = $run_blocks[$i];
+            foreach ($candidate as $line) {
+                if (str_contains($line, 'Subscriber checked:')) {
+                    $run_lines = $candidate;
+                    break 2;
+                }
+            }
+        }
+
+        if ($run_lines === []) {
+            return [];
         }
 
         $subscribers_by_id = [];
@@ -1010,7 +1089,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                 $summary = preg_replace('/^\[[^\]]+\]\s*/', '', $line) ?? $line;
             }
 
-            if (preg_match('/Subscriber checked:\s*(.+?), events found=(\d+)\./', $line, $m) === 1) {
+            if (preg_match('/Subscriber checked:\s*(.+?),\s*events found=(\d+)(?:,\s*birthday=(?:yes|no))?\./', $line, $m) === 1) {
                 $meta = $this->parseSubscriberLogMeta($m[1]);
                 $user_id = (string) ($meta['user_id'] ?? '');
                 $opt_in = $user_id !== '' ? ($subscribers_by_id[$user_id] ?? null) : null;
@@ -1035,7 +1114,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                 ];
             }
 
-            if (preg_match('/Subscriber emailed:\s*(.+?), events sent=(\d+)\./', $line, $m) === 1) {
+            if (preg_match('/Subscriber emailed:\s*(.+?),\s*(?:type=[^,]+,\s*)?events sent=(\d+)\./', $line, $m) === 1) {
                 $meta = $this->parseSubscriberLogMeta($m[1]);
                 $key = (string) ($meta['user_id'] ?? strtolower(($meta['email'] ?? '') . '|' . ($meta['name'] ?? '')));
                 if (isset($rows_by_user[$key])) {
@@ -1044,7 +1123,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
                 }
             }
 
-            if (preg_match('/Subscriber email failed:\s*(.+?), events found=(\d+)/', $line, $m) === 1) {
+            if (preg_match('/Subscriber email failed:\s*(.+?),\s*(?:type=[^,]+,\s*)?events found=(\d+)/', $line, $m) === 1) {
                 $meta = $this->parseSubscriberLogMeta($m[1]);
                 $key = (string) ($meta['user_id'] ?? strtolower(($meta['email'] ?? '') . '|' . ($meta['name'] ?? '')));
                 if (isset($rows_by_user[$key])) {
@@ -1104,14 +1183,15 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         $configured = $token !== '' && $opt_in_count > 0;
         $status_rows = '';
         $status_rows .= '<tr><th scope="row">' . $this->te('Daily email configured') . '</th><td>' . ($configured ? '<span class="badge bg-success">' . $this->te('Yes') . '</span>' : '<span class="badge bg-warning text-dark">' . $this->te('Not yet') . '</span>') . '</td></tr>';
-        $status_rows .= '<tr><th scope="row">' . $this->te('Daily date timezone') . '</th><td>' . $this->esc($this->localTimezoneName() . ' (' . $this->localDateTime() . ')') . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Webtrees website timezone') . '</th><td>' . $this->esc($this->localTimezoneName() . ' (' . $this->localDateTime() . ')') . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Daily send time') . '</th><td>' . $this->esc($this->sendTimeFromSettings($settings)) . '</td></tr>';
         $status_rows .= '<tr><th scope="row">' . $this->te('Registered user daily email opt-ins') . '</th><td>' . $this->esc((string) $opt_in_count) . '</td></tr>';
         $historical_path = $this->historicalFactsDataPath();
         $historical_available = is_dir($historical_path);
         $status_rows .= '<tr><th scope="row">' . $this->te('Historical context') . '</th><td>' . ($historical_available ? '<span class="badge bg-success">' . $this->te('Available') . '</span>' : '<span class="badge bg-secondary">' . $this->te('Not found') . '</span>') . '</td></tr>';
         $last_attempt = (string) ($settings['last_scheduler_attempt'] ?? $settings['last_cron_attempt'] ?? '');
         $status_rows .= '<tr><th scope="row">' . $this->te('Last daily email check') . '</th><td>' . $this->esc($last_attempt !== '' ? $last_attempt : $this->t('The daily email has not checked yet')) . '</td></tr>';
-        $status_rows .= '<tr><th scope="row">' . $this->te('Last sent date') . '</th><td>' . $this->esc($last_run !== '' ? $last_run : $this->t('Not sent yet')) . '</td></tr>';
+        $status_rows .= '<tr><th scope="row">' . $this->te('Last processed date') . '</th><td>' . $this->esc($last_run !== '' ? $last_run : $this->t('Not sent yet')) . '</td></tr>';
         $status_rows .= '<tr><th scope="row">' . $this->te('Last result') . '</th><td>' . $this->esc($last_result !== '' ? $last_result : '-') . '</td></tr>';
         $status_rows .= '<tr><th scope="row">' . $this->te('Events last sent') . '</th><td>' . $this->esc($last_count) . '</td></tr>';
         $status_rows .= '<tr><th scope="row">' . $this->te('Recipients last sent') . '</th><td>' . $this->esc($last_recipients !== '' ? $last_recipients : '-') . '</td></tr>';
@@ -1129,21 +1209,43 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         } else {
             $url = $this->runDailyUrl($tree, $token);
             $scheduler_command = "/usr/bin/curl -L -sS --fail '" . $url . "' >/dev/null 2>&1";
+            $cron_entry = '*/15 * * * * ' . $scheduler_command;
             $html .= '<p class="mb-1"><strong>' . $this->te('Secure scheduler URL:') . '</strong></p>'
                 . '<textarea class="form-control mb-2" rows="3" readonly>' . $this->esc($url) . '</textarea>'
                 . '<p class="mb-1"><strong>' . $this->te('Scheduled task command:') . '</strong></p>'
                 . '<textarea class="form-control mb-2" rows="2" readonly>' . $this->esc($scheduler_command) . '</textarea>'
-                . '<p class="mb-2 text-muted">' . $this->t('Test the URL in your browser first. After the first test, add %s only if you need to test it again on the same day.', '<code>&amp;force=1</code>') . '</p>'
+                . '<p class="mb-1"><strong>' . $this->te('Recommended Linux cron entry:') . '</strong></p>'
+                . '<textarea class="form-control mb-2" rows="2" readonly>' . $this->esc($cron_entry) . '</textarea>'
+                . '<p class="mb-2 text-muted">' . $this->t('Run the scheduler every 15 minutes. Routine checks exit immediately until the configured local send time is due, and only one daily run is processed. If your host only permits hourly tasks, hourly is also safe but delivery may be up to 59 minutes late.') . '</p>'
+                . '<p class="mb-2 text-muted">' . $this->t('Test the URL in your browser first. Add %s only if you deliberately need to process the same local date again for testing.', '<code>&amp;force=1</code>') . '</p>'
                 . '<p class="mb-0 text-muted">' . $this->t('Daily email diagnostic log: %s', '<code>modules_v4/potts_on_this_day_email/data/scheduler.log</code>') . '</p>';
         }
 
         return $html . '</div></div>';
     }
 
-    private function emailText(Tree $tree, Collection $facts, ?array $relationship_settings = null, string $relationship_label = ''): string
+    private function emailText(Tree $tree, Collection $facts, ?array $relationship_settings = null, string $relationship_label = '', ?array $birthday = null): string
     {
         $lines = [];
-        $lines[] = $this->t('On this day in the family tree');
+
+        if ($birthday !== null) {
+            $lines[] = $this->birthdayHeadline($birthday);
+            $lines[] = str_repeat('=', strlen($this->birthdayHeadline($birthday)));
+            $lines[] = $this->birthdayMessageText($birthday);
+            $lines[] = '';
+
+            if ($facts->isEmpty()) {
+                $lines[] = $this->t('Your birthday is today’s special family-tree event.');
+                $lines[] = '';
+                $lines[] = $this->emailTurnOffText($tree);
+                return implode(PHP_EOL, $lines);
+            }
+
+            $lines[] = $this->t('Also on this day in the family tree');
+        } else {
+            $lines[] = $this->t('On this day in the family tree');
+        }
+
         $lines[] = $this->localDateHeading();
         $lines[] = '';
 
@@ -1195,9 +1297,25 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         return implode(PHP_EOL, $lines);
     }
 
-    private function emailHtml(Tree $tree, Collection $facts, ?array $relationship_settings = null, string $relationship_label = ''): string
+    private function emailHtml(Tree $tree, Collection $facts, ?array $relationship_settings = null, string $relationship_label = '', ?array $birthday = null): string
     {
-        $html = '<h2>' . $this->te('On this day in the family tree') . '</h2>';
+        $html = '';
+
+        if ($birthday !== null) {
+            $html .= '<div style="background:#f6ead0;border:1px solid #d8b56d;border-radius:12px;padding:24px;text-align:center;margin:0 0 24px">'
+                . '<div style="font-size:30px;font-weight:700;line-height:1.2;color:#6b4818">' . $this->esc($this->birthdayHeadline($birthday)) . '</div>'
+                . '<p style="font-size:17px;line-height:1.55;margin:14px 0 0;color:#3e3427">' . $this->esc($this->birthdayMessageText($birthday)) . '</p>'
+                . '</div>';
+
+            if ($facts->isEmpty()) {
+                return $html . '<p>' . $this->te('Your birthday is today’s special family-tree event.') . '</p>' . $this->emailTurnOffHtml($tree);
+            }
+
+            $html .= '<h2>' . $this->te('Also on this day in the family tree') . '</h2>';
+        } else {
+            $html .= '<h2>' . $this->te('On this day in the family tree') . '</h2>';
+        }
+
         $html .= '<p>' . $this->esc($this->localDateHeading()) . '</p>';
 
         if ($facts->isEmpty()) {
@@ -1242,6 +1360,103 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         }
 
         return $html . $this->emailTurnOffHtml($tree);
+    }
+
+    /**
+     * @return array{individual:Individual,fact:Fact,name:string,age:int|null}|null
+     */
+    private function subscriberBirthdayDetails(Tree $tree, Collection $facts, array $relationship_settings): ?array
+    {
+        $root_xref = $this->relationshipRootXref($relationship_settings, '');
+        if ($root_xref === '') {
+            return null;
+        }
+
+        $root = Registry::individualFactory()->make($root_xref, $tree);
+        if (!$root instanceof Individual) {
+            return null;
+        }
+
+        $birthday_fact = $facts->first(static function (Fact $fact) use ($root_xref): bool {
+            $record = $fact->record();
+
+            return $fact->tag() === 'INDI:BIRT'
+                && $record instanceof Individual
+                && strtoupper($record->xref()) === $root_xref;
+        });
+
+        if (!$birthday_fact instanceof Fact) {
+            return null;
+        }
+
+        $birth_year = $this->factYear($birthday_fact);
+        $age = $birth_year !== null ? $this->localCurrentYear() - $birth_year : null;
+        if ($age !== null && $age < 0) {
+            $age = null;
+        }
+
+        return [
+            'individual' => $root,
+            'fact' => $birthday_fact,
+            'name' => $this->firstName($root),
+            'age' => $age,
+        ];
+    }
+
+    /**
+     * @param array{individual:Individual,fact:Fact,name:string,age:int|null}|null $birthday
+     */
+    private function factsWithoutSubscriberBirthday(Collection $facts, ?array $birthday): Collection
+    {
+        if ($birthday === null) {
+            return $facts;
+        }
+
+        $birthday_fact = $birthday['fact'];
+        $root_xref = strtoupper($birthday['individual']->xref());
+
+        return $facts->reject(static function (Fact $fact) use ($birthday_fact, $root_xref): bool {
+            if ($fact === $birthday_fact) {
+                return true;
+            }
+
+            $record = $fact->record();
+
+            return $fact->tag() === 'INDI:BIRT'
+                && $record instanceof Individual
+                && strtoupper($record->xref()) === $root_xref;
+        })->values();
+    }
+
+    /**
+     * @param array{individual:Individual,fact:Fact,name:string,age:int|null} $birthday
+     */
+    private function birthdaySubject(array $birthday): string
+    {
+        return $this->t('Happy Birthday, %s!', $birthday['name']);
+    }
+
+    /**
+     * @param array{individual:Individual,fact:Fact,name:string,age:int|null} $birthday
+     */
+    private function birthdayHeadline(array $birthday): string
+    {
+        return $this->t('Happy Birthday, %s!', $birthday['name']);
+    }
+
+    /**
+     * @param array{individual:Individual,fact:Fact,name:string,age:int|null} $birthday
+     */
+    private function birthdayMessageText(array $birthday): string
+    {
+        if ($birthday['age'] !== null) {
+            return $this->t(
+                'Today you turn %s. We hope your day is filled with family, laughter and good memories, with many more stories still to be made.',
+                (string) $birthday['age']
+            );
+        }
+
+        return $this->t('We hope your day is filled with family, laughter and good memories, with many more stories still to be made.');
     }
 
     private function emailTurnOffText(Tree $tree): string
@@ -2663,50 +2878,75 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     private function userRelationshipSettings(Tree $tree, UserInterface $user): array
     {
+        // Version 1.2.0 and earlier stored these values in data/user_settings.json.
+        // Keep that file as a read-only migration fallback, but prefer webtrees'
+        // own per-user/per-tree preference storage once the user saves again.
         $all = $this->readUserSettings();
-        $tree_key = $tree->name();
-        $user_key = (string) $user->id();
-        $settings = $all[$tree_key][$user_key] ?? [];
+        $legacy = $all[$tree->name()][(string) $user->id()] ?? [];
+        if (!is_array($legacy)) {
+            $legacy = [];
+        }
 
-        if (!is_array($settings)) {
-            $settings = [];
+        try {
+            $has_database_settings = $tree->getUserPreference($user, self::USER_PREF_VERSION, '') === '1';
+        } catch (Throwable) {
+            $has_database_settings = false;
+        }
+
+        if ($has_database_settings) {
+            try {
+                return [
+                    'personal_preview_enabled' => '1',
+                    'daily_email_enabled' => $tree->getUserPreference($user, self::USER_PREF_DAILY, '0'),
+                    'relationship_filter_enabled' => $tree->getUserPreference($user, self::USER_PREF_REL_FILTER, '1'),
+                    'living_people_only' => $tree->getUserPreference($user, self::USER_PREF_LIVING, '0'),
+                    'relationship_root_xref' => strtoupper(trim($tree->getUserPreference($user, self::USER_PREF_ROOT, ''))),
+                    'relationship_max_steps' => $tree->getUserPreference($user, self::USER_PREF_STEPS, '4'),
+                    'email' => $this->plain($user->email()),
+                    'name' => $this->plain($user->realName()) ?: $this->plain($user->userName()),
+                    'updated' => $tree->getUserPreference($user, self::USER_PREF_UPDATED, ''),
+                ];
+            } catch (Throwable) {
+                // Fall through to the legacy settings below if the database
+                // preference store is temporarily unavailable.
+            }
         }
 
         return [
             'personal_preview_enabled' => '1',
-            'daily_email_enabled' => (string) ($settings['daily_email_enabled'] ?? '0'),
-            'relationship_filter_enabled' => (string) ($settings['relationship_filter_enabled'] ?? '1'),
-            'living_people_only' => (string) ($settings['living_people_only'] ?? '0'),
-            'relationship_root_xref' => strtoupper(trim((string) ($settings['relationship_root_xref'] ?? ''))),
-            'relationship_max_steps' => (string) ($settings['relationship_max_steps'] ?? '4'),
-            'email' => (string) ($settings['email'] ?? ''),
-            'name' => (string) ($settings['name'] ?? ''),
+            'daily_email_enabled' => (string) ($legacy['daily_email_enabled'] ?? '0'),
+            'relationship_filter_enabled' => (string) ($legacy['relationship_filter_enabled'] ?? '1'),
+            'living_people_only' => (string) ($legacy['living_people_only'] ?? '0'),
+            'relationship_root_xref' => strtoupper(trim((string) ($legacy['relationship_root_xref'] ?? ''))),
+            'relationship_max_steps' => (string) ($legacy['relationship_max_steps'] ?? '4'),
+            'email' => $this->plain($user->email()),
+            'name' => $this->plain($user->realName()) ?: $this->plain($user->userName()),
+            'updated' => (string) ($legacy['updated'] ?? ''),
         ];
     }
 
     private function saveUserRelationshipSettings(Tree $tree, UserInterface $user, array $settings): bool
     {
-        $all = $this->readUserSettings();
-        $tree_key = $tree->name();
-        $user_key = (string) $user->id();
-
-        if (!isset($all[$tree_key]) || !is_array($all[$tree_key])) {
-            $all[$tree_key] = [];
+        if ($user->id() <= 0) {
+            return false;
         }
 
-        $all[$tree_key][$user_key] = [
-            'personal_preview_enabled' => '1',
-            'daily_email_enabled' => (string) ($settings['daily_email_enabled'] ?? '0'),
-            'relationship_filter_enabled' => (string) ($settings['relationship_filter_enabled'] ?? '1'),
-            'living_people_only' => (string) ($settings['living_people_only'] ?? '0'),
-            'relationship_root_xref' => strtoupper(trim((string) ($settings['relationship_root_xref'] ?? ''))),
-            'relationship_max_steps' => (string) ($settings['relationship_max_steps'] ?? '4'),
-            'email' => (string) ($settings['email'] ?? ''),
-            'name' => (string) ($settings['name'] ?? ''),
-            'updated' => $this->localDateTime(),
-        ];
+        try {
+            // Write the version marker last. If an earlier database write fails,
+            // the next read will continue to use the legacy JSON fallback rather
+            // than treating a partially-written preference set as complete.
+            $tree->setUserPreference($user, self::USER_PREF_DAILY, (string) ($settings['daily_email_enabled'] ?? '0'));
+            $tree->setUserPreference($user, self::USER_PREF_REL_FILTER, (string) ($settings['relationship_filter_enabled'] ?? '1'));
+            $tree->setUserPreference($user, self::USER_PREF_LIVING, (string) ($settings['living_people_only'] ?? '0'));
+            $tree->setUserPreference($user, self::USER_PREF_ROOT, strtoupper(trim((string) ($settings['relationship_root_xref'] ?? ''))));
+            $tree->setUserPreference($user, self::USER_PREF_STEPS, (string) ($settings['relationship_max_steps'] ?? '4'));
+            $tree->setUserPreference($user, self::USER_PREF_UPDATED, $this->localDateTime());
+            $tree->setUserPreference($user, self::USER_PREF_VERSION, '1');
+        } catch (Throwable) {
+            return false;
+        }
 
-        return $this->writeUserSettings($all);
+        return true;
     }
 
     /**
@@ -2721,26 +2961,25 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
      */
     private function dailyEmailOptIns(Tree $tree): array
     {
-        $all = $this->readUserSettings();
-        $tree_key = $tree->name();
-        $tree_settings = $all[$tree_key] ?? [];
-        if (!is_array($tree_settings)) {
+        try {
+            $user_service = Registry::container()->get(UserService::class);
+        } catch (Throwable) {
+            $user_service = app(UserService::class);
+        }
+
+        if (!$user_service instanceof UserService) {
             return [];
         }
 
         $opt_ins = [];
         $seen = [];
-        foreach ($tree_settings as $user_id => $settings) {
-            if (!is_array($settings)) {
-                continue;
-            }
-
-            if ((string) ($settings['daily_email_enabled'] ?? '0') !== '1') {
-                continue;
-            }
-
-            $subscriber_user = $this->userById((int) $user_id);
+        foreach ($user_service->all() as $subscriber_user) {
             if (!$subscriber_user instanceof UserInterface || $subscriber_user->id() <= 0) {
+                continue;
+            }
+
+            $settings = $this->userRelationshipSettings($tree, $subscriber_user);
+            if ((string) ($settings['daily_email_enabled'] ?? '0') !== '1') {
                 continue;
             }
 
@@ -3092,32 +3331,87 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         ]), $route_parameters));
     }
 
+    private function defaultSettings(): array
+    {
+        return [
+            'token' => '',
+            'sender_email' => '',
+            'sender_name' => '',
+            'tree' => '',
+            'send_time' => self::DEFAULT_SEND_TIME,
+            'last_run' => '',
+            'last_scheduler_attempt' => '',
+            'last_result' => '',
+            'last_count' => '0',
+            'last_recipients' => '',
+            'last_error' => '',
+            'relationship_filter_enabled' => '1',
+            'living_people_only' => '0',
+            'relationship_root_xref' => '',
+            'relationship_max_steps' => '4',
+        ];
+    }
+
     private function settings(): array
     {
+        $settings = $this->defaultSettings();
         $path = $this->settingsPath();
-        if (!is_file($path)) {
-            return [
-                'token' => '',
-                'sender_email' => '',
-                'sender_name' => '',
-                'tree' => '',
-                'last_run' => '',
-                'last_scheduler_attempt' => '',
-                'last_result' => '',
-                'last_count' => '0',
-                'last_recipients' => '',
-                'last_error' => '',
-                'relationship_filter_enabled' => '1',
-                'living_people_only' => '0',
-                'relationship_root_xref' => '',
-                'relationship_max_steps' => '4',
-            ];
+
+        if (is_file($path)) {
+            $json = file_get_contents($path);
+            $saved = json_decode($json ?: '', true);
+            if (is_array($saved)) {
+                $settings = array_replace($settings, $saved);
+            }
         }
 
-        $json = file_get_contents($path);
-        $settings = json_decode($json ?: '', true);
+        return $this->normaliseSchedulerSettings($settings);
+    }
 
-        return is_array($settings) ? $settings : [];
+    /**
+     * Upgrade legacy scheduler settings in memory.
+     *
+     * Version 1.1.x stored a separate module timezone. Version 1.2.0 follows
+     * the webtrees website timezone instead. If the previous run crossed the
+     * date boundary between those two timezones, convert last_run so upgrading
+     * does not immediately send a duplicate daily email.
+     */
+    private function normaliseSchedulerSettings(array $settings): array
+    {
+        if (!$this->isValidSendTime((string) ($settings['send_time'] ?? ''))) {
+            $settings['send_time'] = self::DEFAULT_SEND_TIME;
+        }
+
+        $legacy_timezone = trim((string) ($settings['timezone'] ?? ''));
+        $last_run = (string) ($settings['last_run'] ?? '');
+        $last_attempt = (string) ($settings['last_scheduler_attempt'] ?? $settings['last_cron_attempt'] ?? '');
+        $last_result = (string) ($settings['last_result'] ?? '');
+
+        if (
+            $legacy_timezone !== ''
+            && in_array($legacy_timezone, timezone_identifiers_list(), true)
+            && $last_run !== ''
+            && $last_attempt !== ''
+            && in_array($last_result, ['sent', 'no events', 'no subscribers', 'failed'], true)
+        ) {
+            try {
+                $attempt = new \DateTimeImmutable($last_attempt);
+                $legacy_date = $attempt->setTimezone(new \DateTimeZone($legacy_timezone))->format('Y-m-d');
+
+                if ($legacy_date === $last_run) {
+                    $settings['last_run'] = $attempt
+                        ->setTimezone(new \DateTimeZone($this->localTimezoneName()))
+                        ->format('Y-m-d');
+                }
+            } catch (\Throwable) {
+                // Keep the saved last_run unchanged if an old diagnostic
+                // timestamp cannot be parsed.
+            }
+        }
+
+        unset($settings['timezone'], $settings['last_cron_attempt']);
+
+        return $settings;
     }
 
     private function saveSettings(array $settings): bool
@@ -3129,6 +3423,7 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
         $this->ensureHtaccess();
 
+        $settings = $this->normaliseSchedulerSettings($settings);
         $json = json_encode($settings, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         if ($json === false) {
             return false;
@@ -3137,11 +3432,21 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
         return file_put_contents($this->settingsPath(), $json . PHP_EOL, LOCK_EX) !== false;
     }
 
+    private function isValidSendTime(string $send_time): bool
+    {
+        return preg_match('/^(?:[01]\\d|2[0-3]):[0-5]\\d$/', $send_time) === 1;
+    }
+
+    private function sendTimeFromSettings(array $settings): string
+    {
+        $send_time = (string) ($settings['send_time'] ?? self::DEFAULT_SEND_TIME);
+
+        return $this->isValidSendTime($send_time) ? $send_time : self::DEFAULT_SEND_TIME;
+    }
 
     private function localTimezoneName(): string
     {
-        $settings = $this->settings();
-        $timezone = (string) ($settings['timezone'] ?? self::DEFAULT_TIMEZONE);
+        $timezone = Site::getPreference('TIMEZONE');
 
         if (!in_array($timezone, timezone_identifiers_list(), true)) {
             return self::DEFAULT_TIMEZONE;
@@ -3152,6 +3457,10 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     private function localNow(): \DateTimeImmutable
     {
+        if ($this->scheduler_now instanceof \DateTimeImmutable) {
+            return $this->scheduler_now;
+        }
+
         return new \DateTimeImmutable('now', new \DateTimeZone($this->localTimezoneName()));
     }
 

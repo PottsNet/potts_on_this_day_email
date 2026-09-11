@@ -13,6 +13,8 @@ use Fisharebest\Webtrees\Tree;
  * @var array<string,string> $tree_urls
  * @var Tree|null $selected_tree
  * @var array<string,string> $settings
+ * @var string $site_timezone
+ * @var string $site_local_time
  * @var bool $saved
  * @var bool $prepared
  * @var bool $token_reset
@@ -27,7 +29,9 @@ use Fisharebest\Webtrees\Tree;
 $selected_name = $selected_tree instanceof Tree ? $selected_tree->name() : '';
 $sender_name = (string) ($settings['sender_name'] ?? '');
 $sender_email = (string) ($settings['sender_email'] ?? '');
-$timezone = (string) ($settings['timezone'] ?? 'UTC');
+$send_time = (string) ($settings['send_time'] ?? '06:00');
+$site_timezone = (string) ($site_timezone ?? 'UTC');
+$site_local_time = (string) ($site_local_time ?? '');
 $has_token = (string) ($settings['token'] ?? '') !== '';
 $tr = static fn (string $text, mixed ...$args): string => I18N::translate($text, ...$args);
 $recent_send_html = (string) ($recent_send_html ?? '');
@@ -97,11 +101,11 @@ $recent_send_html = (string) ($recent_send_html ?? '');
                 <div class="card-body">
                     <div class="alert alert-info">
                         <?= e($tr('This module sends through the webtrees email service configured under Control panel > Website > Sending email.')) ?>
-                        <?= e($tr('Use authenticated SMTP for reliable delivery. Cron controls the time only.')) ?>
+                        <?= e($tr('Use authenticated SMTP for reliable delivery. The scheduler checks whether the configured local delivery time is due.')) ?>
                     </div>
 
                     <div class="row g-3">
-                        <div class="col-12 col-lg-4">
+                        <div class="col-12 col-lg-3">
                             <label class="form-label" for="potts-otd-sender-name"><?= e($tr('Sender name')) ?></label>
                             <input class="form-control" id="potts-otd-sender-name" name="sender_name" type="text" value="<?= e($sender_name) ?>" required>
                         </div>
@@ -110,10 +114,15 @@ $recent_send_html = (string) ($recent_send_html ?? '');
                             <input class="form-control" id="potts-otd-sender-email" name="sender_email" type="email" value="<?= e($sender_email) ?>" required>
                             <div class="form-text"><?= e($tr('Use an address accepted by the configured SMTP account.')) ?></div>
                         </div>
-                        <div class="col-12 col-lg-4">
-                            <label class="form-label" for="potts-otd-timezone"><?= e($tr('Daily timezone')) ?></label>
-                            <input class="form-control" id="potts-otd-timezone" name="timezone" type="text" value="<?= e($timezone) ?>" placeholder="Australia/Melbourne" required>
-                            <div class="form-text"><?= e($tr('Use a PHP timezone identifier.')) ?></div>
+                        <div class="col-12 col-lg-3">
+                            <label class="form-label"><?= e($tr('Webtrees website timezone')) ?></label>
+                            <input class="form-control" type="text" value="<?= e($site_timezone) ?>" readonly>
+                            <div class="form-text"><?= e($tr('This comes from Control panel > Website > Website preferences. Current site time: %s', $site_local_time)) ?></div>
+                        </div>
+                        <div class="col-12 col-lg-2">
+                            <label class="form-label" for="potts-otd-send-time"><?= e($tr('Daily send time')) ?></label>
+                            <input class="form-control" id="potts-otd-send-time" name="send_time" type="time" value="<?= e($send_time) ?>" required>
+                            <div class="form-text"><?= e($tr('Uses the webtrees website timezone.')) ?></div>
                         </div>
                     </div>
 
@@ -126,7 +135,7 @@ $recent_send_html = (string) ($recent_send_html ?? '');
             <div class="card mb-3">
                 <div class="card-header"><h3 class="h5 mb-0"><?= e($tr('Daily scheduler')) ?></h3></div>
                 <div class="card-body">
-                    <p><?= e($tr('Cron or another scheduler requests a secure URL once per day. The module then sends messages through webtrees SMTP.')) ?></p>
+                    <p><?= e($tr('Run the secure scheduler URL every 15 minutes. Most checks exit immediately; the module sends only when the configured local time is due and the current local date has not already been processed.')) ?></p>
                     <?php if ($has_token) : ?>
                         <button class="btn btn-outline-danger" type="submit" name="task" value="reset_token" onclick="return confirm(&quot;<?= e($tr('Generate a new scheduler URL? The current scheduled task will stop working until it is updated.')) ?>&quot;)"><?= e($tr('Generate new scheduler token')) ?></button>
                     <?php else : ?>
@@ -145,8 +154,8 @@ $recent_send_html = (string) ($recent_send_html ?? '');
             <div class="card-body">
                 <p><?= e($tr('The settings page prepares the secure URL, but it cannot normally create a server-level scheduled task. Choose the option that matches your hosting environment.')) ?></p>
 
-                <div class="alert alert-warning">
-                    <strong><?= e($tr('Check the scheduler timezone.')) ?></strong> <?= e($tr('The module timezone determines which family-tree date is used. The hosting panel, operating system or external service determines the actual time the request runs.')) ?>
+                <div class="alert alert-info">
+                    <strong><?= e($tr('The server timezone does not need to match webtrees.')) ?></strong> <?= e($tr('The module converts the current instant to the webtrees website timezone, applies the configured daily send time and processes each local calendar date only once. Daylight-saving changes are handled automatically by the timezone database.')) ?>
                 </div>
 
                 <div class="accordion" id="potts-otd-scheduler-help">
@@ -156,7 +165,7 @@ $recent_send_html = (string) ($recent_send_html ?? '');
                         </h4>
                         <div class="accordion-collapse collapse show" id="potts-otd-help-cpanel" aria-labelledby="potts-otd-help-cpanel-heading" data-bs-parent="#potts-otd-scheduler-help">
                             <div class="accordion-body">
-                                <?= e($tr('Open Advanced > Cron Jobs, choose a daily time and paste the scheduled task command shown above into the command field.')) ?>
+                                <?= e($tr('Open Advanced > Cron Jobs. Set Minute to */15 and leave Hour, Day, Month and Weekday as *. Paste the scheduled task command shown above into the command field.')) ?>
                             </div>
                         </div>
                     </div>
@@ -167,7 +176,7 @@ $recent_send_html = (string) ($recent_send_html ?? '');
                         </h4>
                         <div class="accordion-collapse collapse" id="potts-otd-help-plesk" aria-labelledby="potts-otd-help-plesk-heading" data-bs-parent="#potts-otd-scheduler-help">
                             <div class="accordion-body">
-                                <?= e($tr('Open Websites & Domains > Scheduled Tasks > Add Task. Choose Fetch a URL, paste the secure scheduler URL shown above and select a daily time.')) ?>
+                                <?= e($tr('Open Websites & Domains > Scheduled Tasks > Add Task. Choose Fetch a URL, paste the secure scheduler URL shown above and run it every 15 minutes.')) ?>
                             </div>
                         </div>
                     </div>
@@ -178,7 +187,7 @@ $recent_send_html = (string) ($recent_send_html ?? '');
                         </h4>
                         <div class="accordion-collapse collapse" id="potts-otd-help-directadmin" aria-labelledby="potts-otd-help-directadmin-heading" data-bs-parent="#potts-otd-scheduler-help">
                             <div class="accordion-body">
-                                <?= e($tr('Open User Level > Advanced Features > Cron Jobs, enter a daily schedule and paste the scheduled task command shown above.')) ?>
+                                <?= e($tr('Open User Level > Advanced Features > Cron Jobs, use */15 for minutes with the other schedule fields set to * and paste the scheduled task command shown above.')) ?>
                             </div>
                         </div>
                     </div>
@@ -189,7 +198,7 @@ $recent_send_html = (string) ($recent_send_html ?? '');
                         </h4>
                         <div class="accordion-collapse collapse" id="potts-otd-help-linux" aria-labelledby="potts-otd-help-linux-heading" data-bs-parent="#potts-otd-scheduler-help">
                             <div class="accordion-body">
-                                <?= e($tr('Run crontab -e as the web account and add a daily cron expression followed by the command shown above. For example, 0 6 * * * runs at 6:00 am in the cron service timezone.')) ?>
+                                <?= e($tr('Run crontab -e as the web account and add the recommended */15 * * * * entry shown above. The cron service timezone is irrelevant because the module decides when the local delivery time is due.')) ?>
                             </div>
                         </div>
                     </div>
@@ -200,7 +209,7 @@ $recent_send_html = (string) ($recent_send_html ?? '');
                         </h4>
                         <div class="accordion-collapse collapse" id="potts-otd-help-external" aria-labelledby="potts-otd-help-external-heading" data-bs-parent="#potts-otd-scheduler-help">
                             <div class="accordion-body">
-                                <?= e($tr('Use a reputable external URL scheduling service. Create a daily HTTPS request and paste the secure scheduler URL shown above. Store the URL as a secret where the service supports secrets and never publish it.')) ?>
+                                <?= e($tr('Use a reputable external URL scheduling service. Create an HTTPS request every 15 minutes and paste the secure scheduler URL shown above. Store the URL as a secret where the service supports secrets and never publish it.')) ?>
                             </div>
                         </div>
                     </div>
@@ -211,13 +220,13 @@ $recent_send_html = (string) ($recent_send_html ?? '');
                         </h4>
                         <div class="accordion-collapse collapse" id="potts-otd-help-other" aria-labelledby="potts-otd-help-other-heading" data-bs-parent="#potts-otd-scheduler-help">
                             <div class="accordion-body">
-                                <?= e($tr('Use the platform Task Scheduler to run a daily HTTPS request with curl, wget or its built-in URL-fetch action. Use the secure URL shown above and confirm the task reports an HTTP 200 response.')) ?>
+                                <?= e($tr('Use the platform Task Scheduler to run an HTTPS request every 15 minutes with curl, wget or its built-in URL-fetch action. Use the secure URL shown above and confirm the task reports an HTTP 200 response.')) ?>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <p class="text-muted mt-3 mb-0"><?= e($tr('If none of these options is available, ask the hosting provider to schedule one daily HTTPS request to the secure URL.')) ?></p>
+                <p class="text-muted mt-3 mb-0"><?= e($tr('If your hosting provider does not allow 15-minute tasks, hourly is also safe; the email may simply arrive later than the configured time.')) ?></p>
             </div>
         </div>
 
