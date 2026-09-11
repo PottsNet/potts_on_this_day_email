@@ -3698,6 +3698,13 @@ return new class extends AbstractModule implements ModuleCustomInterface, Module
 
     private function plain(string $html): string
     {
+        // HTML <q> elements rely on the browser to draw quotation marks.
+        // Preserve that meaning before stripping markup so webtrees nicknames
+        // such as <q class="wt-nickname">Jack</q> remain visibly quoted in
+        // plain-text email content and other text-only module output.
+        $html = preg_replace('/<q\b[^>]*>/i', '“', $html) ?? $html;
+        $html = preg_replace('/<\/q>/i', '”', $html) ?? $html;
+
         return trim(html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
     }
 
